@@ -1,0 +1,11 @@
+torch>=1.13.0
+transformers>=4.30.0
+datasets>=2.15.0
+tqdm>=4.65.0
+ptflops>=0.6.5
+wandb>=0.15.0
+PyYAML>=6.0
+python-dotenv>=1.0.0
+numpy>=1.21.0
+matplotlib>=3.5.0
+pandas>=1.4.0
