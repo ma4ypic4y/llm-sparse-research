@@ -6,19 +6,16 @@ pruning:
   target_sparsity: 0.5
   warmup_ratio: 0.15
   final_prune_ratio: 0.85
-  prune_applications: 10
+  prune_applications: 12
 
-# Training parameters
+# Training parameters (optimized for GPU memory constraints)
 training:
-  epochs: 20
-  batch_size: 128
+  epochs: 25
+  batch_size: 64
   seq_len: 512
-  lr: 0.0005
-  weight_decay: 0.01
-  warmup_steps: 500
+  lr: 0.0003
   device: 'cuda'
   use_bf16: true
-  gradient_clip_norm: 1.0
 
 paths:
   output_dir: 'exp'
