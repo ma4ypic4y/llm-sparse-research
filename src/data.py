@@ -22,7 +22,9 @@ def load_shakespeare(batch_size: int, seq_len: int, tokenizer: GPT2TokenizerFast
     logger.debug(f"Train split: {len(split['train'])}, Val split: {len(split['test'])}")
 
     def tokenize(ex):
-        return tokenizer(ex['text'], add_special_tokens=False).input_ids
+        # Add EOS token at the end for proper language modeling
+        text = ex['text'] + tokenizer.eos_token
+        return tokenizer(text, add_special_tokens=False).input_ids
 
     # Process each split
     for split_name in ['train', 'test']:

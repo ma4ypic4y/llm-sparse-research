@@ -18,7 +18,7 @@ def loss_fn(logits, labels):
 def evaluate(model, val_loader: DataLoader, device: str):
     model.eval()
     total_loss = 0
-    total_tokens = 0
+    num_batches = 0
 
     with torch.no_grad():
         for batch in val_loader:
@@ -26,7 +26,8 @@ def evaluate(model, val_loader: DataLoader, device: str):
             logits = model(ids[:, :-1]).logits
             labels = shift_labels(ids)
             loss = loss_fn(logits, labels)
-            total_loss += loss.item() * labels.numel()
-            total_tokens += labels.numel()
+            total_loss += loss.item()
+            num_batches += 1
 
-    return math.exp(total_loss / total_tokens)
+    avg_loss = total_loss / num_batches
+    return math.exp(avg_loss)

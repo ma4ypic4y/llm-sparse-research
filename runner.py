@@ -101,15 +101,28 @@ def main():
     logger.info(f"Model initialized with {total_params:,} parameters")
 
     # Optimizer and scheduler
-    optimizer = AdamW(model.parameters(), lr=config['training']['lr'])
+    optimizer = AdamW(
+        model.parameters(),
+        lr=config['training']['lr'],
+        weight_decay=0.01,      # Add some regularization
+        betas=(0.9, 0.999),     # Standard betas for GPT
+        eps=1e-8
+    )
 
     total_steps = config['training']['epochs'] * len(train_loader)
+    # Use separate warmup for LR (10% of total steps is common)
+    lr_warmup_steps = max(1, int(0.1 * total_steps))
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
-        config['pruning']['warmup_steps'],
+        lr_warmup_steps,
         total_steps
     )
-    logger.info(f"Optimizer and scheduler initialized. Total training steps: {total_steps}")
+    logger.info(f"Optimizer and scheduler initialized:")
+    logger.info(f"  - Total training steps: {total_steps}")
+    logger.info(f"  - LR warmup steps: {lr_warmup_steps}")
+    logger.info(f"  - Learning rate: {config['training']['lr']}")
+    logger.info(f"  - Weight decay: 0.01")
+    logger.info(f"  - Gradient clipping: max_norm=1.0")
 
     # Initialize mixed precision training
     use_bf16 = config['training'].get('use_bf16', False)
@@ -162,6 +175,11 @@ def main():
 
                 # Backward pass with gradient scaling
                 scaler.scale(loss).backward()
+
+                # Gradient clipping for stability
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
                 scaler.step(optimizer)
                 scaler.update()
             else:
@@ -170,6 +188,10 @@ def main():
                 loss = loss_fn(logits, labels)
 
                 loss.backward()
+
+                # Gradient clipping for stability
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
                 optimizer.step()
 
             scheduler.step()
@@ -208,13 +230,23 @@ def main():
         val_ppl = evaluate(model, val_loader, device)
         avg_train_loss = epoch_loss / num_batches
 
+        # Log additional diagnostics
+        current_lr = scheduler.get_last_lr()[0]
+
         wandb.log({
             'validation_ppl': val_ppl,
             'epoch': epoch + 1,
-            'avg_train_loss': avg_train_loss
+            'avg_train_loss': avg_train_loss,
+            'current_lr': current_lr
         }, step=global_step)
 
-        logger.info(f"Epoch {epoch + 1}: train_loss={avg_train_loss:.4f}, val_ppl={val_ppl:.2f}")
+        logger.info(f"Epoch {epoch + 1}: train_loss={avg_train_loss:.4f}, val_ppl={val_ppl:.2f}, lr={current_lr:.6f}")
+
+        # Warning if perplexity is too high
+        if val_ppl > 500:
+            logger.warning(f"⚠️  High validation perplexity detected: {val_ppl:.1f}")
+        elif val_ppl < 10:
+            logger.info(f"🎯 Good validation perplexity: {val_ppl:.1f}")
 
         if hasattr(pruner, 'metrics_collector'):
             epoch_metrics = pruner.metrics_collector.collect_all_metrics(model, global_step)

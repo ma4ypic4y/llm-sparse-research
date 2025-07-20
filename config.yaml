@@ -13,7 +13,7 @@ training:
   epochs: 25
   batch_size: 64
   seq_len: 512
-  lr: 0.0003
+  lr: 0.0001              # Much lower LR - was too high!
   device: 'cuda'
   use_bf16: true
 
