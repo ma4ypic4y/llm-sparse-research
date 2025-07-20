@@ -6,6 +6,7 @@ Dynamic weight sparsification during GPT2 training on Tiny Shakespeare with magn
 
 ```bash
 uv venv -p python3.11
+source .venv/bin/activate
 uv pip install -r requirements.txt
 python runner.py --config config.yaml
 ```
@@ -69,7 +70,7 @@ sparse_weights/
 - `trends/sparsity_slope` - Sparsity growth rate
 - `trends/avg_revival_rate` - Weight revival dynamics
 
-## Analysis Tools
+## Analysis Tools (not checked, full AI generated code)
 
 ```bash
 # Quick sparsity check

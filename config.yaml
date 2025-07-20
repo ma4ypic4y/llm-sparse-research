@@ -4,14 +4,14 @@ project_name: 'sparse-weights'
 # Pruning parameters
 pruning:
   target_sparsity: 0.5
-  warmup_ratio: 0.10
+  warmup_ratio: 0.15
   final_prune_ratio: 0.85
   prune_applications: 10
 
 # Training parameters
 training:
-  epochs: 50
-  batch_size: 32
+  epochs: 8
+  batch_size: 16
   seq_len: 128
   lr: 0.001
   device: 'cuda'

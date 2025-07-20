@@ -8,16 +8,16 @@ import numpy as np
 
 
 class WeightStabilityTracker:
-    """Отслеживает стабильность зануления весов - как долго они остаются нулевыми"""
+    """Track weight sparsity stability - how long weights remain zero"""
 
     def __init__(self):
-        self.zero_duration = defaultdict(int)  # Как долго вес остается нулевым
-        self.previous_masks = {}  # Маски предыдущего шага
-        self.first_zero_step = {}  # На каком шаге вес впервые занулился
-        self.revived_count = defaultdict(int)  # Сколько раз вес оживал
+        self.zero_duration = defaultdict(int)
+        self.previous_masks = {}
+        self.first_zero_step = {}
+        self.revived_count = defaultdict(int)
 
     def update(self, model: nn.Module, step: int) -> Dict[str, float]:
-        """Обновляет статистику стабильности весов"""
+        """Update weight stability statistics"""
         stats = {}
         total_revived = 0
         total_stable_zeros = 0
@@ -31,23 +31,19 @@ class WeightStabilityTracker:
             if name in self.previous_masks:
                 prev_mask = self.previous_masks[name]
 
-                # Веса которые ожили (были 0, стали !=0)
                 revived = (prev_mask == True) & (current_mask == False)
                 revived_count = revived.sum().item()
                 total_revived += revived_count
                 self.revived_count[name] += revived_count
 
-                # Веса которые остались нулевыми
                 stable_zeros = (prev_mask == True) & (current_mask == True)
                 stable_zero_count = stable_zeros.sum().item()
                 total_stable_zeros += stable_zero_count
 
-                # Обновляем длительность зануления
                 for idx in torch.nonzero(stable_zeros, as_tuple=False):
                     coord = tuple(idx.tolist())
                     self.zero_duration[(name, coord)] += 1
 
-                # Записываем первое зануление
                 newly_zeroed = (prev_mask == False) & (current_mask == True)
                 for idx in torch.nonzero(newly_zeroed, as_tuple=False):
                     coord = tuple(idx.tolist())
@@ -64,10 +60,10 @@ class WeightStabilityTracker:
 
 
 class LayerAnalyzer:
-    """Анализирует состояние отдельных слоев"""
+    """Analyze individual layer state"""
 
     def analyze_layer_sparsity(self, model: nn.Module) -> Dict[str, float]:
-        """Анализ спарсности по слоям"""
+        """Analyze sparsity by layers"""
         stats = {}
 
         for name, module in model.named_modules():
@@ -76,20 +72,16 @@ class LayerAnalyzer:
                 sparsity = (w == 0).float().mean().item()
                 stats[f'layer_sparsity/{name}'] = sparsity
 
-                # Дополнительная статистика для Linear слоев
                 if isinstance(module, nn.Linear):
-                    # Мертвые выходные нейроны (все исходящие связи = 0)
                     dead_out = (w == 0).all(dim=1).sum().item()
-                    # Мертвые входные связи (все входящие связи = 0)
                     dead_in = (w == 0).all(dim=0).sum().item()
-
                     stats[f'dead_neurons/{name}_out'] = dead_out / w.shape[0]
                     stats[f'dead_neurons/{name}_in'] = dead_in / w.shape[1]
 
         return stats
 
     def analyze_layernorm_weights(self, model: nn.Module) -> Dict[str, float]:
-        """Анализ весов LayerNorm - зануленные веса указывают на мертвые нейроны"""
+        """Analyze LayerNorm weights - zeroed weights indicate dead neurons"""
         stats = {}
 
         for name, module in model.named_modules():
@@ -102,7 +94,7 @@ class LayerAnalyzer:
         return stats
 
     def compute_effective_rank(self, model: nn.Module, threshold: float = 0.01) -> Dict[str, float]:
-        """Вычисляет эффективный ранг матриц весов через SVD"""
+        """Compute effective rank of weight matrices via SVD"""
         stats = {}
 
         for name, module in model.named_modules():
@@ -112,7 +104,6 @@ class LayerAnalyzer:
                     try:
                         U, s, V = torch.svd(w)
                         if len(s) > 0:
-                            # Effective rank - количество сингулярных значений выше threshold
                             max_singular = s[0].item()
                             if max_singular > 0:
                                 effective_rank = (s > threshold * max_singular).sum().item()
@@ -125,10 +116,10 @@ class LayerAnalyzer:
 
 
 class GradientAnalyzer:
-    """Анализирует градиенты зануленных весов"""
+    """Analyze gradients of zeroed weights"""
 
     def analyze_zero_gradients(self, model: nn.Module) -> Dict[str, float]:
-        """Анализирует градиенты зануленных весов"""
+        """Analyze gradients of zeroed weights"""
         stats = {}
         total_zero_weights = 0
         total_zero_grad_norms = 0
@@ -140,7 +131,6 @@ class GradientAnalyzer:
                 total_zero_weights += zero_count
 
                 if zero_count > 0:
-                    # Градиенты зануленных весов
                     zero_grads = param.grad[zero_mask]
                     grad_norm = torch.norm(zero_grads).item()
                     total_zero_grad_norms += grad_norm
@@ -153,26 +143,21 @@ class GradientAnalyzer:
 
 
 class PruningMetricsCollector:
-    """Основной класс для сбора всех метрик спарсификации"""
+    """Main class for collecting all sparsification metrics"""
 
     def __init__(self):
         self.stability_tracker = WeightStabilityTracker()
         self.layer_analyzer = LayerAnalyzer()
         self.gradient_analyzer = GradientAnalyzer()
         self.logger = logging.getLogger('sparse_weights.metrics')
-
-        # История метрик для анализа трендов
         self.metric_history = defaultdict(list)
 
     def collect_all_metrics(self, model: nn.Module, step: int,
                           log_to_wandb: bool = True) -> Dict[str, Any]:
-        """Собирает все метрики и логирует их"""
+        """Collect all metrics and log them"""
         all_stats = {}
 
         try:
-            # Спарсность - несколько вариантов для полной картины
-
-            # 1. Спарсность всех параметров модели (включая embeddings, layernorm)
             total_all_params = 0
             zero_all_params = 0
             for param in model.parameters():
@@ -183,56 +168,42 @@ class PruningMetricsCollector:
             all_params_sparsity = zero_all_params / (total_all_params + 1e-8)
             all_stats['sparsity/all_parameters'] = all_params_sparsity
 
-            # 2. Спарсность только прунимых весов (Linear + Conv2d, без norm и embed)
             total_prunable_params = 0
             zero_prunable_params = 0
 
-            for name, param in model.named_parameters():
-                if (param.requires_grad and 'weight' in name and
-                    not any(exclude in name.lower() for exclude in ['norm', 'embed'])):
-                    # Проверяем что это Linear или Conv2d слой
-                    parent_module = model
-                    for part in name.split('.')[:-1]:  # Получаем родительский модуль
-                        parent_module = getattr(parent_module, part)
-
-                    if isinstance(parent_module, (nn.Linear, nn.Conv2d)):
+            for module in model.modules():
+                if isinstance(module, (nn.Linear, nn.Conv2d)) and hasattr(module, 'weight'):
+                    param = module.weight
+                    if param.requires_grad:
                         total_prunable_params += param.numel()
                         zero_prunable_params += (param.data == 0).sum().item()
 
             prunable_sparsity = zero_prunable_params / (total_prunable_params + 1e-8)
             all_stats['sparsity/prunable_weights'] = prunable_sparsity
-
-            # 3. Основная метрика - спарсность прунимых весов (для совместимости)
             all_stats['sparsity/overall'] = prunable_sparsity
 
-            # 4. Дополнительная статистика
             all_stats['stats/total_parameters'] = total_all_params
             all_stats['stats/prunable_parameters'] = total_prunable_params
             all_stats['stats/prunable_ratio'] = total_prunable_params / (total_all_params + 1e-8)
 
-            # Детальная аналитика
             stability_stats = self.stability_tracker.update(model, step)
             layer_sparsity_stats = self.layer_analyzer.analyze_layer_sparsity(model)
             layernorm_stats = self.layer_analyzer.analyze_layernorm_weights(model)
             effective_rank_stats = self.layer_analyzer.compute_effective_rank(model)
             gradient_stats = self.gradient_analyzer.analyze_zero_gradients(model)
 
-            # Объединяем все статистики
             all_stats.update(stability_stats)
             all_stats.update(layer_sparsity_stats)
             all_stats.update(layernorm_stats)
             all_stats.update(effective_rank_stats)
             all_stats.update(gradient_stats)
 
-            # Сохраняем историю для трендового анализа
             for key, value in all_stats.items():
                 self.metric_history[key].append((step, value))
 
-            # Дополнительная аналитика каждые N шагов
             if step % 100 == 0:
                 self._compute_trend_metrics(all_stats, step)
 
-            # Логирование
             if log_to_wandb:
                 wandb.log(all_stats, step=step)
 
@@ -244,15 +215,13 @@ class PruningMetricsCollector:
         return all_stats
 
     def _compute_trend_metrics(self, stats: Dict[str, Any], step: int):
-        """Вычисляет трендовые метрики"""
-        # Анализ тренда общей спарсности
+        """Compute trend metrics"""
         sparsity_history = self.metric_history.get('sparsity/overall', [])
         if len(sparsity_history) >= 10:
             recent_values = [v for s, v in sparsity_history[-10:]]
             trend_slope = np.polyfit(range(len(recent_values)), recent_values, 1)[0]
             stats['trends/sparsity_slope'] = trend_slope
 
-        # Анализ стабильности revival rate
         revival_history = self.metric_history.get('weight_revival/revival_rate', [])
         if len(revival_history) >= 10:
             recent_values = [v for s, v in revival_history[-10:]]
@@ -260,19 +229,16 @@ class PruningMetricsCollector:
             stats['trends/avg_revival_rate'] = avg_revival_rate
 
     def get_final_report(self) -> Dict[str, Any]:
-        """Генерирует финальный отчет по метрикам"""
+        """Generate final metrics report"""
         report = {}
 
-        # Статистика по revival
         total_revivals = sum(self.stability_tracker.revived_count.values())
         report['final/total_weight_revivals'] = total_revivals
 
-        # Средняя длительность зануления
         if self.stability_tracker.zero_duration:
             avg_duration = np.mean(list(self.stability_tracker.zero_duration.values()))
             report['final/avg_zero_duration'] = avg_duration
 
-        # Процент весов, которые никогда не ожили
         total_first_zeros = len(self.stability_tracker.first_zero_step)
         never_revived = total_first_zeros - len([k for k in self.stability_tracker.revived_count.keys()
                                               if self.stability_tracker.revived_count[k] > 0])

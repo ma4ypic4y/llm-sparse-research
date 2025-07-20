@@ -19,35 +19,27 @@ class WeightPruner:
         self.freq = prune_freq
         self.applied = 0.0
 
-        # Интегрируем систему сбора метрик
         self.metrics_collector = metrics_collector or PruningMetricsCollector()
-
-        # Дополнительная статистика
-        self.pruning_history = []  # История применения прунинга
-        self.step_sparsities = {}  # Спарсность на каждом шаге
+        self.pruning_history = []
+        self.step_sparsities = {}
 
     def __call__(self, step: int, model: nn.Module):
-        # Сначала собираем метрики до прунинга (если нужно)
         if step % self.freq == 0 or step == self.warmup:
             pre_prune_stats = self.metrics_collector.collect_all_metrics(
                 model, step, log_to_wandb=False
             )
 
-        # Применяем прунинг
         prune_applied = self._apply_pruning(step)
 
-        # Собираем метрики после прунинга
         post_prune_stats = self.metrics_collector.collect_all_metrics(
             model, step, log_to_wandb=True
         )
 
-        # Логируем информацию о прунинге
         self._log_pruning_stats(step, prune_applied, post_prune_stats)
-
         return post_prune_stats
 
     def _apply_pruning(self, step: int) -> bool:
-        """Применяет прунинг и возвращает True если прунинг был применен"""
+        """Apply pruning and return True if pruning was applied"""
         if step < self.warmup or step % self.freq != 0:
             return False
 
@@ -58,17 +50,14 @@ class WeightPruner:
         if inc <= 0:
             return False
 
-        # Применяем прунинг
         self.prune.global_unstructured(
             self.to_prune,
             pruning_method=self.prune.L1Unstructured,
             amount=inc
         )
 
-        old_applied = self.applied
         self.applied = desired
 
-        # Записываем в историю
         self.pruning_history.append({
             'step': step,
             'sparsity_increase': inc,
@@ -79,8 +68,7 @@ class WeightPruner:
         return True
 
     def _log_pruning_stats(self, step: int, prune_applied: bool, stats: dict):
-        """Логирует статистику прунинга"""
-        # Базовая спарсность (совместимость со старым кодом)
+        """Log pruning statistics"""
         total = 0
         zero = 0
         for m, _ in self.to_prune:
@@ -89,10 +77,8 @@ class WeightPruner:
             zero += int((tensor == 0).sum())
         sparsity = zero / total
 
-        # Сохраняем в историю
         self.step_sparsities[step] = sparsity
 
-        # Дополнительные метрики прунинга
         pruning_stats = {
             'pruning/sparsity': sparsity,
             'pruning/target_sparsity': self.target,
@@ -100,27 +86,24 @@ class WeightPruner:
             'pruning/prune_applied': int(prune_applied)
         }
 
-        # Анализ скорости роста спарсности
         if len(self.step_sparsities) >= 2:
-            recent_steps = sorted(self.step_sparsities.keys())[-5:]  # Последние 5 шагов
+            recent_steps = sorted(self.step_sparsities.keys())[-5:]
             if len(recent_steps) >= 2:
                 sparsity_values = [self.step_sparsities[s] for s in recent_steps]
-                # Простой расчет скорости роста
                 sparsity_growth_rate = (sparsity_values[-1] - sparsity_values[0]) / len(recent_steps)
                 pruning_stats['pruning/sparsity_growth_rate'] = sparsity_growth_rate
 
-        # Логируем
         wandb.log(pruning_stats, step=step)
 
     def get_pruning_summary(self) -> dict:
-        """Возвращает сводку по процессу прунинга"""
+        """Return pruning process summary"""
         if not self.pruning_history:
             return {}
 
         total_increments = sum(h['sparsity_increase'] for h in self.pruning_history)
         num_prune_steps = len(self.pruning_history)
 
-        summary = {
+        return {
             'total_pruning_increments': total_increments,
             'num_pruning_steps': num_prune_steps,
             'avg_increment_per_step': total_increments / num_prune_steps if num_prune_steps > 0 else 0,
@@ -128,5 +111,3 @@ class WeightPruner:
             'target_sparsity': self.target,
             'pruning_efficiency': self.applied / self.target if self.target > 0 else 0
         }
-
-        return summary

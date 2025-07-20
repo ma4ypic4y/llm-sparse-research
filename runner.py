@@ -184,7 +184,6 @@ def main():
 
             global_step += 1
 
-        # Validation
         val_ppl = evaluate(model, val_loader, device)
         avg_train_loss = epoch_loss / num_batches
 
@@ -196,11 +195,9 @@ def main():
 
         logger.info(f"Epoch {epoch + 1}: train_loss={avg_train_loss:.4f}, val_ppl={val_ppl:.2f}")
 
-        # Log epoch-level metrics summary
         if hasattr(pruner, 'metrics_collector'):
             epoch_metrics = pruner.metrics_collector.collect_all_metrics(model, global_step)
 
-            # Детальное логирование спарсности
             if 'sparsity/overall' in epoch_metrics:
                 prunable_sparsity = epoch_metrics['sparsity/overall']
                 all_params_sparsity = epoch_metrics.get('sparsity/all_parameters', 0)
@@ -208,7 +205,6 @@ def main():
                 logger.info(f"Sparsity - Prunable weights: {prunable_sparsity:.2%}")
                 logger.info(f"Sparsity - All parameters: {all_params_sparsity:.2%}")
 
-                # Показываем также статистику параметров
                 if 'stats/total_parameters' in epoch_metrics:
                     total_params = epoch_metrics['stats/total_parameters']
                     prunable_params = epoch_metrics.get('stats/prunable_parameters', 0)
@@ -217,7 +213,6 @@ def main():
                     logger.info(f"Model stats - Total params: {total_params:,}, "
                               f"Prunable: {prunable_params:,} ({prunable_ratio:.1%})")
 
-                # Показываем revival метрики если есть
                 if 'weight_revival/revival_rate' in epoch_metrics:
                     revival_rate = epoch_metrics['weight_revival/revival_rate']
                     total_revived = epoch_metrics.get('weight_revival/total_revived', 0)
@@ -226,79 +221,68 @@ def main():
             else:
                 logger.info("Current sparsity: metrics not available")
 
-    # Final metrics and reports
     logger.info("Generating final reports...")
 
-    # Собираем финальные метрики
     final_step_metrics = metrics_collector.collect_all_metrics(model, global_step)
-
-    # Get final metrics report
     final_metrics = metrics_collector.get_final_report()
     wandb.log(final_metrics)
 
-    # Get pruning summary
     pruning_summary = pruner.get_pruning_summary()
     wandb.log(pruning_summary)
 
-    # Детальный финальный отчет
-    logger.info("="*80)
-    logger.info("ФИНАЛЬНЫЙ ОТЧЕТ ПО СПАРСИФИКАЦИИ")
-    logger.info("="*80)
+    logger.info("="*60)
+    logger.info("FINAL SPARSIFICATION REPORT")
+    logger.info("="*60)
 
-    # Спарсность
     prunable_sparsity = final_step_metrics.get('sparsity/overall', 0)
     all_params_sparsity = final_step_metrics.get('sparsity/all_parameters', 0)
     target_sparsity = config['pruning']['target_sparsity']
 
-    logger.info(f"🎯 ЦЕЛЕВАЯ СПАРСНОСТЬ: {target_sparsity:.1%}")
-    logger.info(f"📊 ДОСТИГНУТАЯ СПАРСНОСТЬ:")
-    logger.info(f"   - Прунимые веса: {prunable_sparsity:.2%}")
-    logger.info(f"   - Все параметры: {all_params_sparsity:.2%}")
-    logger.info(f"   - Эффективность: {prunable_sparsity/target_sparsity:.1%} от цели")
+    logger.info(f"🎯 TARGET SPARSITY: {target_sparsity:.1%}")
+    logger.info(f"📊 ACHIEVED SPARSITY:")
+    logger.info(f"   - Prunable weights: {prunable_sparsity:.2%}")
+    logger.info(f"   - All parameters: {all_params_sparsity:.2%}")
+    logger.info(f"   - Efficiency: {prunable_sparsity/target_sparsity:.1%} of target")
 
-    # Параметры модели
     total_params = final_step_metrics.get('stats/total_parameters', 0)
     prunable_params = final_step_metrics.get('stats/prunable_parameters', 0)
     prunable_ratio = final_step_metrics.get('stats/prunable_ratio', 0)
 
-    logger.info(f"🔢 ПАРАМЕТРЫ МОДЕЛИ:")
-    logger.info(f"   - Общее количество: {total_params:,}")
-    logger.info(f"   - Прунимые: {prunable_params:,} ({prunable_ratio:.1%})")
-    logger.info(f"   - Зануленные: {int(prunable_params * prunable_sparsity):,}")
+    logger.info(f"🔢 MODEL PARAMETERS:")
+    logger.info(f"   - Total: {total_params:,}")
+    logger.info(f"   - Prunable: {prunable_params:,} ({prunable_ratio:.1%})")
+    logger.info(f"   - Zeroed: {int(prunable_params * prunable_sparsity):,}")
 
-    # Анализ разморозки весов
     total_revivals = final_metrics.get('final/total_weight_revivals', 0)
     never_revived_pct = final_metrics.get('final/never_revived_percentage', 0)
     avg_duration = final_metrics.get('final/avg_zero_duration', 0)
 
-    logger.info(f"🔄 АНАЛИЗ РАЗМОРОЗКИ ВЕСОВ:")
-    logger.info(f"   - Общее количество разморозок: {total_revivals}")
+    logger.info(f"🔄 WEIGHT REVIVAL ANALYSIS:")
+    logger.info(f"   - Total revivals: {total_revivals}")
     if isinstance(never_revived_pct, (int, float)):
-        logger.info(f"   - Никогда не размораживались: {never_revived_pct:.1%}")
+        logger.info(f"   - Never revived: {never_revived_pct:.1%}")
         if never_revived_pct > 0.8:
-            logger.warning("   ⚠️  ВНИМАНИЕ: Очень высокий % необратимо зануленных весов!")
+            logger.warning("   ⚠️  WARNING: Very high % of irreversibly zeroed weights!")
         elif never_revived_pct > 0.6:
-            logger.info("   ⚠️  Высокий % стабильно зануленных весов")
+            logger.info("   ⚠️  High % of stably zeroed weights")
         else:
-            logger.info("   ✅ Здоровая динамика весов")
-    logger.info(f"   - Средняя длительность зануления: {avg_duration:.1f} шагов")
+            logger.info("   ✅ Healthy weight dynamics")
+    logger.info(f"   - Average zero duration: {avg_duration:.1f} steps")
 
-    # Прунинг статистика
     num_prune_steps = pruning_summary.get('num_pruning_steps', 0)
     avg_increment = pruning_summary.get('avg_increment_per_step', 0)
 
-    logger.info(f"✂️  СТАТИСТИКА ПРУНИНГА:")
-    logger.info(f"   - Количество шагов прунинга: {num_prune_steps}")
-    logger.info(f"   - Средний прирост за шаг: {avg_increment:.3f}")
-    logger.info(f"   - Конфигурация: warmup={config['pruning']['warmup_steps']}, "
+    logger.info(f"✂️  PRUNING STATISTICS:")
+    logger.info(f"   - Number of pruning steps: {num_prune_steps}")
+    logger.info(f"   - Average increment per step: {avg_increment:.3f}")
+    logger.info(f"   - Configuration: warmup={config['pruning']['warmup_steps']}, "
               f"freq={config['pruning']['prune_freq']}, final={config['pruning']['final_prune_step']}")
 
-    logger.info("="*80)
+    logger.info("="*60)
 
     logger.info(f"Final metrics: {final_metrics}")
     logger.info(f"Pruning summary: {pruning_summary}")
 
-    # Compute and log FLOPs
     flops = compute_flops(model, config['training']['seq_len'], device)
     if flops is not None:
         wandb.log({'flops_forward': flops})
@@ -306,14 +290,11 @@ def main():
     else:
         logger.warning("Could not compute FLOPs (ptflops not available)")
 
-    # Save model and results
     logger.info(f"Saving model to {output_dir}")
     model.save_pretrained(output_dir)
 
     if flops is not None:
         (output_dir / 'flops.txt').write_text(str(flops))
-
-    # Save metrics summary
     import json
     metrics_summary = {
         'final_metrics': final_metrics,
