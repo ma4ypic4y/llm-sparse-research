@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from transformers import GPT2Tokenizer, GPT2Config, GPT2LMHeadModel
 from torch.optim import AdamW
 from transformers import get_cosine_schedule_with_warmup
+from torch.cuda.amp import autocast, GradScaler
 
 from src import (
     WeightPruner,
@@ -110,6 +111,12 @@ def main():
     )
     logger.info(f"Optimizer and scheduler initialized. Total training steps: {total_steps}")
 
+    # Initialize mixed precision training
+    use_bf16 = config['training'].get('use_bf16', False)
+    scaler = GradScaler() if use_bf16 else None
+    if use_bf16:
+        logger.info("Mixed precision training enabled (bf16)")
+
     # Initialize metrics collector
     metrics_collector = PruningMetricsCollector()
     logger.info("Metrics collector initialized")
@@ -145,12 +152,26 @@ def main():
 
         for batch in progress_bar:
             ids = batch['input_ids'].to(device)
-            logits = model(ids[:, :-1]).logits
-            labels = shift_labels(ids)
-            loss = loss_fn(logits, labels)
 
-            loss.backward()
-            optimizer.step()
+            # Forward pass with mixed precision if enabled
+            if use_bf16:
+                with autocast(dtype=torch.bfloat16):
+                    logits = model(ids[:, :-1]).logits
+                    labels = shift_labels(ids)
+                    loss = loss_fn(logits, labels)
+
+                # Backward pass with gradient scaling
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                logits = model(ids[:, :-1]).logits
+                labels = shift_labels(ids)
+                loss = loss_fn(logits, labels)
+
+                loss.backward()
+                optimizer.step()
+
             scheduler.step()
             optimizer.zero_grad()
 

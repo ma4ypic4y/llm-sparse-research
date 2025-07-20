@@ -15,6 +15,7 @@ training:
   seq_len: 128
   lr: 0.001
   device: 'cuda'
+  use_bf16: true  # Enable bfloat16 mixed precision training
 
 paths:
   output_dir: 'exp'
