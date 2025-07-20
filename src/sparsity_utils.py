@@ -53,7 +53,12 @@ def calculate_sparsity_stats(model: nn.Module) -> Dict[str, Any]:
                     zero_prunable_params += zero_count
                     layer_sparsity[name] = zero_count / param_size
 
-                    w = param.data
+                    # Handle both pruned and unpruned weights
+                    if hasattr(parent_module, 'weight_orig'):
+                        w = parent_module.weight.data  # Masked weights
+                    else:
+                        w = param.data  # Original weights
+
                     if w.dim() == 2:
                         dead_out = (w == 0).all(dim=1).sum().item()
                         dead_in = (w == 0).all(dim=0).sum().item()

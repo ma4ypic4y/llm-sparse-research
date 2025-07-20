@@ -172,11 +172,22 @@ class PruningMetricsCollector:
             zero_prunable_params = 0
 
             for module in model.modules():
-                if isinstance(module, (nn.Linear, nn.Conv2d)) and hasattr(module, 'weight'):
-                    param = module.weight
+                if isinstance(module, (nn.Linear, nn.Conv2d)):
+                    # Handle both pruned and unpruned modules
+                    if hasattr(module, 'weight_orig'):
+                        # Module has been pruned, use original weights
+                        param = module.weight_orig
+                        actual_weights = module.weight.data
+                    elif hasattr(module, 'weight'):
+                        # Module not pruned yet
+                        param = module.weight
+                        actual_weights = param.data
+                    else:
+                        continue
+
                     if param.requires_grad:
                         total_prunable_params += param.numel()
-                        zero_prunable_params += (param.data == 0).sum().item()
+                        zero_prunable_params += (actual_weights == 0).sum().item()
 
             prunable_sparsity = zero_prunable_params / (total_prunable_params + 1e-8)
             all_stats['sparsity/prunable_weights'] = prunable_sparsity
