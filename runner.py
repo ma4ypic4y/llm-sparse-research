@@ -10,7 +10,7 @@ from tqdm import tqdm
 import torch
 import wandb
 from dotenv import load_dotenv
-from transformers import GPT2TokenizerFast, GPT2Config, GPT2LMHeadModel
+from transformers import GPT2Tokenizer, GPT2Config, GPT2LMHeadModel
 from torch.optim import AdamW
 from transformers import get_cosine_schedule_with_warmup
 
@@ -71,7 +71,7 @@ def main():
     logger.info(f"Using device: {device}")
 
     # Initialize tokenizer
-    tokenizer = GPT2TokenizerFast.from_pretrained(config['model']['tokenizer_name'])
+    tokenizer = GPT2Tokenizer.from_pretrained(config['model']['tokenizer_name'])
     tokenizer.pad_token = tokenizer.eos_token
 
     # Load data
