@@ -11,6 +11,12 @@ uv pip install -r requirements.txt
 python runner.py --config config.yaml
 ```
 
+Run experiments (for different sparsity levels):
+```bash
+chmod +x run_experiments.sh
+./run_experiments.sh
+```
+
 ## Project Structure
 
 ```
