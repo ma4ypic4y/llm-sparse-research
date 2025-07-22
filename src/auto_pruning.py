@@ -9,19 +9,18 @@ def calculate_pruning_schedule(
     total_steps: int,
     warmup_ratio: float = 0.15,
     final_prune_ratio: float = 0.85,
-    prune_applications: int = 10
+    prune_applications: int | None = 10
 ) -> Tuple[int, int, int]:
     """Calculate pruning parameters based on total training steps"""
 
     warmup_steps = max(1, int(total_steps * warmup_ratio))
     final_prune_step = int(total_steps * final_prune_ratio)
 
-    pruning_steps = final_prune_step - warmup_steps
+    assert prune_applications >= 0, "prune_applications must be non-negative"
+    if prune_applications is None:
+        prune_applications = 10
 
-    if prune_applications > 0:
-        prune_freq = max(1, pruning_steps // prune_applications)
-    else:
-        prune_freq = pruning_steps // 10
+    prune_freq = max(1, (final_prune_step - warmup_steps) // prune_applications)
 
     return warmup_steps, final_prune_step, prune_freq
 

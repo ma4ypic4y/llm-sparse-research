@@ -1,32 +1,41 @@
 # Configuration for sparse weights training
-project_name: 'sparse-weights'
+mode: 'masked-weights' # One of: 'none', 'masked-activations', 'masked-weights', 'sparse-activations', 'sparse-weights'
+
+wandb:
+  enabled: true
+  project: 'llm-sparse-research-none'
+
+collector:
+  zero_weight_threshold: 0.0
+  dead_grad_threshold: 0.0
+  trackable_weights_layers: None
+  trackable_masks: None
+  collect_frequency: 1
+  dump_frequency: 100
+  collect_weights: false
 
 # Pruning parameters
 pruning:
-  target_sparsity: 0.5
+  target_sparsity: 0.1
   warmup_ratio: 0.15
   final_prune_ratio: 0.85
   prune_applications: 12
 
 # Training parameters (optimized for GPU memory constraints)
 training:
-  epochs: 25
-  batch_size: 64
-  seq_len: 512
-  lr: 0.0001              # Much lower LR - was too high!
-  device: 'cuda'
+  callbacks: [] # 'data-collector'
+  report_to: ['wandb']
+  epochs: 20
+  batch_size: 8
+  seq_len: 128
+  lr: 0.00005
+  device: 'cpu'
   use_bf16: true
 
 paths:
-  output_dir: 'exp'
+  output_dir: './exp'
 
 # Model settings
 model:
   config_name: 'gpt2'
   tokenizer_name: 'gpt2'
-
-# Logging settings
-logging:
-  level: 'INFO'
-  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-  file: null  # null = console only

@@ -1,8 +1,7 @@
 """Utilities for model sparsity analysis"""
 
-import torch
 import torch.nn as nn
-from typing import Dict, Tuple, List, Any
+from typing import Dict, Any
 
 
 def calculate_sparsity_stats(model: nn.Module) -> Dict[str, Any]:

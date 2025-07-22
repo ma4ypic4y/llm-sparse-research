@@ -35,21 +35,24 @@ def load_shakespeare(batch_size: int, seq_len: int, tokenizer: GPT2TokenizerFast
             num_proc=4
         )
 
-        # Group into sequences of given length
-        def group(examples):
-            ids = sum(examples['ids'], [])
-            n = len(ids) // seq_len * seq_len
-            ids = ids[:n]
-            return {
-                'input_ids': [ids[i:i+seq_len] for i in range(0, n, seq_len)]
-            }
+        # Concatenate all token IDs and create sequences
+        logger.debug(f"Concatenating tokens for {split_name} split...")
+        all_ids = []
+        for example in split[split_name]:
+            all_ids.extend(example['ids'])
 
-        split[split_name] = split[split_name].map(
-            group,
-            batched=True,
-            batch_size=batch_size,
-            remove_columns=['ids']
-        )
+        logger.debug(f"Total tokens in {split_name}: {len(all_ids)}")
+
+        # Create sequences of specified length
+        sequences = []
+        for i in range(0, len(all_ids) - seq_len + 1, seq_len):
+            sequences.append(all_ids[i:i+seq_len])
+
+        logger.debug(f"Created {len(sequences)} sequences of length {seq_len} for {split_name}")
+
+        # Create new dataset with input_ids column
+        from datasets import Dataset
+        split[split_name] = Dataset.from_dict({'input_ids': sequences})
         split[split_name].set_format(type='torch', columns=['input_ids'])
 
     train_loader = DataLoader(split['train'], batch_size=batch_size, shuffle=True)

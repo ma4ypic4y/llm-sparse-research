@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 
 import os
-import sys
-import math
+
 import argparse
 from pathlib import Path
-from tqdm import tqdm
+
+import math
 
 import torch
-import wandb
-from dotenv import load_dotenv
+import torch.nn.functional as F
 from transformers import GPT2Tokenizer, GPT2Config, GPT2LMHeadModel
 from torch.optim import AdamW
-from transformers import get_cosine_schedule_with_warmup
-from torch.cuda.amp import autocast, GradScaler
+from transformers import get_cosine_schedule_with_warmup, Trainer, TrainingArguments, TrainerCallback, DataCollatorForLanguageModeling
 
 from src import (
     WeightPruner,
-    PruningMetricsCollector,
+    ActivationsPruner,
+    GeneralStatisticsCollector,
+    MasksStatisticsCollector,
+    WeightsStatisticsCollector,
+    WeightsGradientsCollector,
+    summarize_statistics,
     load_shakespeare,
-    shift_labels,
-    loss_fn,
-    evaluate,
     compute_flops,
     load_config,
     get_device,
@@ -32,10 +32,29 @@ from src import (
 )
 
 
-def main():
-    # Load environment variables from .env file
-    load_dotenv()
+class PruneCallback(TrainerCallback):
+    def __init__(self, pruner):
+        self.pruner = pruner
 
+        
+    def on_step_end(self, args, state, control, **kwargs):
+        super().on_step_end(args, state, control, **kwargs)
+
+        self.pruner(state.global_step)
+
+
+def eval_metric(eval_preds):
+    logits, labels = eval_preds.predictions, eval_preds.label_ids
+
+    shift_logits = logits[:, :-1, :].reshape(-1, logits.shape[-1])
+    shift_labels = labels[:, 1:].reshape(-1)
+    loss = F.cross_entropy(torch.tensor(shift_logits), torch.tensor(shift_labels)).item()
+
+    perplexity = math.exp(loss) if loss < 300 else float("inf")
+    return {"perplexity": perplexity}
+
+
+def main():
     parser = argparse.ArgumentParser(description='Train sparse weights model')
     parser.add_argument(
         '--config',
@@ -52,21 +71,6 @@ def main():
     logger = setup_logging(config)
     logger.info(f"Loaded configuration from {args.config}")
 
-    # Check wandb token
-    wandb_token = os.getenv('WAN_DB_TOKEN')
-    if wandb_token:
-        os.environ['WANDB_API_KEY'] = wandb_token
-        logger.info("Loaded wandb token from .env file")
-    else:
-        logger.warning("WAN_DB_TOKEN not found in .env file")
-
-    # Initialize wandb
-    wandb.init(
-        project=config['project_name'],
-        config=config
-    )
-    logger.info(f"Initialized wandb project: {config['project_name']}")
-
     # Get device
     device = get_device(config['training']['device'])
     logger.info(f"Using device: {device}")
@@ -82,7 +86,6 @@ def main():
         config['training']['seq_len'],
         tokenizer
     )
-    logger.info(f"Data loaded: {len(train_loader)} train and {len(val_loader)} val batches")
 
     # Auto-configure pruning parameters
     config = auto_configure_pruning(config, train_loader)
@@ -97,270 +100,136 @@ def main():
     # Initialize model
     model_config = GPT2Config.from_pretrained(config['model']['config_name'])
     model = GPT2LMHeadModel(model_config).to(device)
-    total_params = sum(p.numel() for p in model.parameters())
-    logger.info(f"Model initialized with {total_params:,} parameters")
 
     # Optimizer and scheduler
     optimizer = AdamW(
         model.parameters(),
         lr=config['training']['lr'],
-        weight_decay=0.01,      # Add some regularization
-        betas=(0.9, 0.999),     # Standard betas for GPT
+        weight_decay=0.01,
+        betas=(0.9, 0.999),
         eps=1e-8
     )
 
     total_steps = config['training']['epochs'] * len(train_loader)
-    # Use separate warmup for LR (10% of total steps is common)
-    lr_warmup_steps = max(1, int(0.1 * total_steps))
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
-        lr_warmup_steps,
-        total_steps
+        num_warmup_steps=math.ceil(0.1 * total_steps), # Use separate warmup for LR (10% of total steps is common)
+        num_training_steps=total_steps,
     )
-    logger.info(f"Optimizer and scheduler initialized:")
-    logger.info(f"  - Total training steps: {total_steps}")
-    logger.info(f"  - LR warmup steps: {lr_warmup_steps}")
-    logger.info(f"  - Learning rate: {config['training']['lr']}")
-    logger.info(f"  - Weight decay: 0.01")
-    logger.info(f"  - Gradient clipping: max_norm=1.0")
-
-    # Initialize mixed precision training
-    use_bf16 = config['training'].get('use_bf16', False)
-    scaler = GradScaler() if use_bf16 else None
-    if use_bf16:
-        logger.info("Mixed precision training enabled (bf16)")
-
-    # Initialize metrics collector
-    metrics_collector = PruningMetricsCollector()
-    logger.info("Metrics collector initialized")
 
     # Initialize pruner with metrics collector
-    pruner = WeightPruner(
-        model,
-        config['pruning']['target_sparsity'],
-        config['pruning']['warmup_steps'],
-        config['pruning']['final_prune_step'],
-        config['pruning']['prune_freq'],
-        metrics_collector=metrics_collector
-    )
-    logger.info(f"Pruner initialized. Target sparsity: {config['pruning']['target_sparsity']:.1%}")
-
-    # Create output directory
     output_dir = Path(config['paths']['output_dir'])
-    output_dir.mkdir(exist_ok=True)
 
-    # Main training loop
-    global_step = 0
-    logger.info(f"Starting training for {config['training']['epochs']} epochs...")
+    callbacks = []
+    assert config['mode'] in ['none', 'masked-weights', 'masked-activations'], "Only 'none', 'masked-weights' and 'masked-activations' modes are currently supported"
+    if config['mode'] == 'masked-weights':
+        callbacks.append(PruneCallback(
+            WeightPruner(
+                model,
+                config['pruning']['target_sparsity'],
+                config['pruning']['warmup_steps'],
+                config['pruning']['final_prune_step'],
+                config['pruning']['prune_freq'],
+            )
+        ))
+    elif config['mode'] == 'masked-activations':
+        callbacks.append(PruneCallback(
+            ActivationsPruner(
+                model,
+                config['pruning']['target_sparsity'],
+                config['pruning']['warmup_steps'],
+                config['pruning']['final_prune_step'],
+                config['pruning']['prune_freq'],
+            )
+        ))
 
-    for epoch in range(config['training']['epochs']):
-        model.train()
-        epoch_loss = 0
-        num_batches = 0
-
-        progress_bar = tqdm(
-            train_loader,
-            desc=f"Epoch {epoch + 1}/{config['training']['epochs']}"
+    assert all(callback in ['s-collector', 'g-collector', 'm-collector', 'w-collector'] for callback in config['training']['callbacks']), "Only 's-collector', 'g-collector', 'm-collector' and 'w-collector' callbacks are supported"
+    s_collector = None
+    if 's-collector' in config['training']['callbacks']:
+        s_collector = WeightsStatisticsCollector(
+            config['collector']['zero_weight_threshold'],
+            config['collector']['dead_grad_threshold'],
+            config['collector']['trackable_weights_layers'],
+            config['collector']['collect_frequency'],
+            config['collector']['dump_frequency'],
+            f"./weights_statistics_collector_output_{config['wandb']['project']}"
         )
+        callbacks.append(s_collector)
+    m_collector = None
+    if 'm-collector' in config['training']['callbacks']:
+        m_collector = MasksStatisticsCollector(
+            config['collector']['trackable_weights_layers'],
+            config['collector']['collect_frequency'],
+            config['collector']['dump_frequency'],
+            f"./masks_statistics_collector_output_{config['wandb']['project']}"
+        )
+        callbacks.append(m_collector)
+    g_collector = None
+    if 'g-collector' in config['training']['callbacks']:
+        g_collector = GeneralStatisticsCollector(
+            s_collector,
+            config['collector']['collect_frequency'],
+            config['collector']['dump_frequency'],
+            f"./general_collector_output_{config['wandb']['project']}"
+        )
+        callbacks.append(g_collector)
+    w_collector = None
+    if 'w-collector' in config['training']['callbacks']:
+        assert Fasle, "Fatal: Using of WeightsGradientsCollector isn't expected during the training proccess. You are probably doing something wrong."
+        w_collector = WeightsGradientsCollector(
+            config['collector']['trackable_weights_layers'],
+            config['collector']['dump_frequency'],
+            f"./weights_collector_output_{config['wandb']['project']}"
+        )
+        callbacks.append(w_collector)
 
-        for batch in progress_bar:
-            ids = batch['input_ids'].to(device)
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False,  # GPT-2 does not use masked language modeling
+    )
 
-            # Forward pass with mixed precision if enabled
-            if use_bf16:
-                with autocast(dtype=torch.bfloat16):
-                    logits = model(ids[:, :-1]).logits
-                    labels = shift_labels(ids)
-                    loss = loss_fn(logits, labels)
+    Trainer(
+        model=model,
+        args=TrainingArguments(
+            output_dir=str(output_dir),
+            num_train_epochs=config['training']['epochs'],
+            per_device_train_batch_size=config['training']['batch_size'],
+            per_device_eval_batch_size=config['training']['batch_size'],
+            learning_rate=config['training']['lr'],
+            weight_decay=0.01,
+            adam_beta1=0.9,
+            adam_beta2=0.999,
+            adam_epsilon=1e-8,
+            logging_dir=str(output_dir / 'logs'),
+            logging_steps=10,
+            run_name=config['wandb']['project'],
+            save_steps=1000,
+            eval_steps=5,
+            eval_strategy='steps',
+            save_total_limit=3,
+            fp16=config['training'].get('use_bf16', False),
+            max_grad_norm=1.0,
+            report_to=config['training']['report_to'],
+        ),
+        data_collator=data_collator,
+        train_dataset=train_loader.dataset,
+        eval_dataset=val_loader.dataset,
+        compute_metrics=eval_metric,
+        optimizers=(optimizer, scheduler),
+        callbacks=callbacks,
+    ).train()
 
-                # Backward pass with gradient scaling
-                scaler.scale(loss).backward()
-
-                # Gradient clipping for stability
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                logits = model(ids[:, :-1]).logits
-                labels = shift_labels(ids)
-                loss = loss_fn(logits, labels)
-
-                loss.backward()
-
-                # Gradient clipping for stability
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-                optimizer.step()
-
-            scheduler.step()
-            optimizer.zero_grad()
-
-            # Apply pruning with metrics collection
-            pruning_stats = pruner(global_step, model)
-
-            # Logging
-            epoch_loss += loss.item()
-            num_batches += 1
-
-            # Basic training metrics
-            wandb.log({
-                'train_loss': loss.item(),
-                'train_ppl': math.exp(loss.item()),
-                'learning_rate': scheduler.get_last_lr()[0]
-            }, step=global_step)
-
-            # Update progress bar with key metrics
-            postfix_dict = {
-                'loss': f'{loss.item():.4f}',
-                'ppl': f'{math.exp(loss.item()):.2f}'
-            }
-
-            # Add key pruning metrics to progress bar
-            if 'sparsity/overall' in pruning_stats:
-                postfix_dict['sparsity'] = f"{pruning_stats['sparsity/overall']:.2%}"
-            if 'weight_revival/revival_rate' in pruning_stats:
-                postfix_dict['revival'] = f"{pruning_stats['weight_revival/revival_rate']:.3f}"
-
-            progress_bar.set_postfix(postfix_dict)
-
-            global_step += 1
-
-        val_ppl = evaluate(model, val_loader, device)
-        avg_train_loss = epoch_loss / num_batches
-
-        # Log additional diagnostics
-        current_lr = scheduler.get_last_lr()[0]
-
-        wandb.log({
-            'validation_ppl': val_ppl,
-            'epoch': epoch + 1,
-            'avg_train_loss': avg_train_loss,
-            'current_lr': current_lr
-        }, step=global_step)
-
-        logger.info(f"Epoch {epoch + 1}: train_loss={avg_train_loss:.4f}, val_ppl={val_ppl:.2f}, lr={current_lr:.6f}")
-
-        # Warning if perplexity is too high
-        if val_ppl > 500:
-            logger.warning(f"⚠️  High validation perplexity detected: {val_ppl:.1f}")
-        elif val_ppl < 10:
-            logger.info(f"🎯 Good validation perplexity: {val_ppl:.1f}")
-
-        if hasattr(pruner, 'metrics_collector'):
-            epoch_metrics = pruner.metrics_collector.collect_all_metrics(model, global_step)
-
-            if 'sparsity/overall' in epoch_metrics:
-                prunable_sparsity = epoch_metrics['sparsity/overall']
-                all_params_sparsity = epoch_metrics.get('sparsity/all_parameters', 0)
-
-                logger.info(f"Sparsity - Prunable weights: {prunable_sparsity:.2%}")
-                logger.info(f"Sparsity - All parameters: {all_params_sparsity:.2%}")
-
-                if 'stats/total_parameters' in epoch_metrics:
-                    total_params = epoch_metrics['stats/total_parameters']
-                    prunable_params = epoch_metrics.get('stats/prunable_parameters', 0)
-                    prunable_ratio = epoch_metrics.get('stats/prunable_ratio', 0)
-
-                    logger.info(f"Model stats - Total params: {total_params:,}, "
-                              f"Prunable: {prunable_params:,} ({prunable_ratio:.1%})")
-
-                if 'weight_revival/revival_rate' in epoch_metrics:
-                    revival_rate = epoch_metrics['weight_revival/revival_rate']
-                    total_revived = epoch_metrics.get('weight_revival/total_revived', 0)
-                    logger.info(f"Weight revival - Rate: {revival_rate:.3f}, "
-                              f"Total revived: {total_revived}")
-            else:
-                logger.info("Current sparsity: metrics not available")
-
-    logger.info("Generating final reports...")
-
-    final_step_metrics = metrics_collector.collect_all_metrics(model, global_step)
-    final_metrics = metrics_collector.get_final_report()
-    wandb.log(final_metrics)
-
-    pruning_summary = pruner.get_pruning_summary()
-    wandb.log(pruning_summary)
-
-    logger.info("="*60)
-    logger.info("FINAL SPARSIFICATION REPORT")
-    logger.info("="*60)
-
-    prunable_sparsity = final_step_metrics.get('sparsity/overall', 0)
-    all_params_sparsity = final_step_metrics.get('sparsity/all_parameters', 0)
-    target_sparsity = config['pruning']['target_sparsity']
-
-    logger.info(f"🎯 TARGET SPARSITY: {target_sparsity:.1%}")
-    logger.info(f"📊 ACHIEVED SPARSITY:")
-    logger.info(f"   - Prunable weights: {prunable_sparsity:.2%}")
-    logger.info(f"   - All parameters: {all_params_sparsity:.2%}")
-    logger.info(f"   - Efficiency: {prunable_sparsity/target_sparsity:.1%} of target")
-
-    total_params = final_step_metrics.get('stats/total_parameters', 0)
-    prunable_params = final_step_metrics.get('stats/prunable_parameters', 0)
-    prunable_ratio = final_step_metrics.get('stats/prunable_ratio', 0)
-
-    logger.info(f"🔢 MODEL PARAMETERS:")
-    logger.info(f"   - Total: {total_params:,}")
-    logger.info(f"   - Prunable: {prunable_params:,} ({prunable_ratio:.1%})")
-    logger.info(f"   - Zeroed: {int(prunable_params * prunable_sparsity):,}")
-
-    total_revivals = final_metrics.get('final/total_weight_revivals', 0)
-    never_revived_pct = final_metrics.get('final/never_revived_percentage', 0)
-    avg_duration = final_metrics.get('final/avg_zero_duration', 0)
-
-    logger.info(f"🔄 WEIGHT REVIVAL ANALYSIS:")
-    logger.info(f"   - Total revivals: {total_revivals}")
-    if isinstance(never_revived_pct, (int, float)):
-        logger.info(f"   - Never revived: {never_revived_pct:.1%}")
-        if never_revived_pct > 0.8:
-            logger.warning("   ⚠️  WARNING: Very high % of irreversibly zeroed weights!")
-        elif never_revived_pct > 0.6:
-            logger.info("   ⚠️  High % of stably zeroed weights")
-        else:
-            logger.info("   ✅ Healthy weight dynamics")
-    logger.info(f"   - Average zero duration: {avg_duration:.1f} steps")
-
-    num_prune_steps = pruning_summary.get('num_pruning_steps', 0)
-    avg_increment = pruning_summary.get('avg_increment_per_step', 0)
-
-    logger.info(f"✂️  PRUNING STATISTICS:")
-    logger.info(f"   - Number of pruning steps: {num_prune_steps}")
-    logger.info(f"   - Average increment per step: {avg_increment:.3f}")
-    logger.info(f"   - Configuration: warmup={config['pruning']['warmup_steps']}, "
-              f"freq={config['pruning']['prune_freq']}, final={config['pruning']['final_prune_step']}")
-
-    logger.info("="*60)
-
-    logger.info(f"Final metrics: {final_metrics}")
-    logger.info(f"Pruning summary: {pruning_summary}")
+    try:
+        stats = summarize_statistics(m_collector, s_collector, w_collector, g_collector)
+        torch.save(stats, os.path.join(str(output_dir), 'collector_data_summary.pt'))
+    except Exception as e:
+        print(f"Error during data collection: {e}")
 
     flops = compute_flops(model, config['training']['seq_len'], device)
     if flops is not None:
-        wandb.log({'flops_forward': flops})
         logger.info(f"Forward pass FLOPs: {flops:,}")
-    else:
-        logger.warning("Could not compute FLOPs (ptflops not available)")
 
-    logger.info(f"Saving model to {output_dir}")
     model.save_pretrained(output_dir)
-
-    if flops is not None:
-        (output_dir / 'flops.txt').write_text(str(flops))
-    import json
-    metrics_summary = {
-        'final_metrics': final_metrics,
-        'pruning_summary': pruning_summary,
-        'config': config
-    }
-
-    with open(output_dir / 'metrics_summary.json', 'w') as f:
-        json.dump(metrics_summary, f, indent=2)
-
-    logger.info("Training completed successfully!")
-    logger.info(f"Metrics summary saved to {output_dir}/metrics_summary.json")
-    wandb.finish()
 
 
 if __name__ == '__main__':
