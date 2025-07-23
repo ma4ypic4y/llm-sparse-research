@@ -45,9 +45,20 @@ class PruneCallback(TrainerCallback):
 def eval_metric(eval_preds):
     logits, labels = eval_preds.predictions, eval_preds.label_ids
 
-    shift_logits = logits[:, :-1, :].reshape(-1, logits.shape[-1])
-    shift_labels = labels[:, 1:].reshape(-1)
-    loss = F.cross_entropy(torch.tensor(shift_logits), torch.tensor(shift_labels)).item()
+    # Shift logits and labels for causal language modeling
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = labels[..., 1:].contiguous()
+
+    # Flatten for loss computation
+    shift_logits = shift_logits.view(-1, shift_logits.size(-1))
+    shift_labels = shift_labels.view(-1)
+
+    # Compute cross entropy loss (ignore padding tokens if any)
+    loss = F.cross_entropy(
+        torch.from_numpy(shift_logits).float(),
+        torch.from_numpy(shift_labels).long(),
+        ignore_index=-100
+    ).item()
 
     perplexity = math.exp(loss) if loss < 300 else float("inf")
     return {"perplexity": perplexity}
@@ -99,9 +110,9 @@ def main():
         for warning in warnings:
             logger.warning(f"Pruning config warning: {warning}")
 
-    # Initialize model
-    model_config = GPT2Config.from_pretrained(config['model']['config_name'])
-    model = GPT2LMHeadModel(model_config).to(device)
+    # Initialize model with pretrained weights
+    model = GPT2LMHeadModel.from_pretrained(config['model']['config_name']).to(device)
+    logger.info(f"Loaded pretrained model: {config['model']['config_name']}")
 
     # Optimizer and scheduler
     optimizer = AdamW(

@@ -15,48 +15,44 @@ def load_shakespeare(batch_size: int, seq_len: int, tokenizer: GPT2TokenizerFast
     }
     ds = load_dataset("text", data_files=data_files)
 
+    # Get the full text and tokenize it all at once
+    full_text = "\n".join(ds['train']['text'])
+    logger.debug(f"Total text length: {len(full_text)} characters")
+
+    # Tokenize the entire text
+    all_tokens = tokenizer(full_text, add_special_tokens=False, return_tensors="pt")['input_ids'][0]
+    logger.debug(f"Total tokens: {len(all_tokens)}")
+
     # Split into train/val (90/10)
-    full = ds['train']
-    logger.debug(f"Total examples: {len(full)}")
-    split = full.train_test_split(test_size=0.1, seed=42)
-    logger.debug(f"Train split: {len(split['train'])}, Val split: {len(split['test'])}")
+    split_idx = int(0.9 * len(all_tokens))
+    train_tokens = all_tokens[:split_idx]
+    val_tokens = all_tokens[split_idx:]
 
-    def tokenize(ex):
-        # Add EOS token at the end for proper language modeling
-        text = ex['text'] + tokenizer.eos_token
-        return tokenizer(text, add_special_tokens=False).input_ids
+    logger.debug(f"Train tokens: {len(train_tokens)}, Val tokens: {len(val_tokens)}")
 
-    # Process each split
-    for split_name in ['train', 'test']:
-        # Tokenization
-        split[split_name] = split[split_name].map(
-            lambda ex: {'ids': tokenize(ex)},
-            remove_columns=['text'],
-            num_proc=4
-        )
-
-        # Concatenate all token IDs and create sequences
-        logger.debug(f"Concatenating tokens for {split_name} split...")
-        all_ids = []
-        for example in split[split_name]:
-            all_ids.extend(example['ids'])
-
-        logger.debug(f"Total tokens in {split_name}: {len(all_ids)}")
-
-        # Create sequences of specified length
+    def create_sequences(tokens, seq_len):
+        """Create overlapping sequences from tokens"""
         sequences = []
-        for i in range(0, len(all_ids) - seq_len + 1, seq_len):
-            sequences.append(all_ids[i:i+seq_len])
+        for i in range(0, len(tokens) - seq_len + 1, seq_len):
+            sequences.append(tokens[i:i+seq_len].tolist())
+        return sequences
 
-        logger.debug(f"Created {len(sequences)} sequences of length {seq_len} for {split_name}")
+    # Create sequences
+    train_sequences = create_sequences(train_tokens, seq_len)
+    val_sequences = create_sequences(val_tokens, seq_len)
 
-        # Create new dataset with input_ids column
-        from datasets import Dataset
-        split[split_name] = Dataset.from_dict({'input_ids': sequences})
-        split[split_name].set_format(type='torch', columns=['input_ids'])
+    logger.debug(f"Created {len(train_sequences)} train sequences, {len(val_sequences)} val sequences")
 
-    train_loader = DataLoader(split['train'], batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(split['test'], batch_size=batch_size)
+    # Create datasets
+    from datasets import Dataset
+    train_dataset = Dataset.from_dict({'input_ids': train_sequences})
+    val_dataset = Dataset.from_dict({'input_ids': val_sequences})
+
+    train_dataset.set_format(type='torch', columns=['input_ids'])
+    val_dataset.set_format(type='torch', columns=['input_ids'])
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
     logger.debug(f"DataLoaders created: train={len(train_loader)} batches, val={len(val_loader)} batches")
 

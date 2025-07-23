@@ -29,10 +29,11 @@ training:
   epochs: 20
   batch_size: 8
   seq_len: 128
-  lr: 0.00005
+  lr: 0.0005
   eval_steps: 100
   device: 'gpu'
   use_bf16: false
+  infer_text: "To be or not to be, that is the"
 
 paths:
   output_dir: './exp'
