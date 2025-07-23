@@ -46,17 +46,22 @@ def eval_metric(eval_preds):
     logits, labels = eval_preds.predictions, eval_preds.label_ids
 
     # Shift logits and labels for causal language modeling
-    shift_logits = logits[..., :-1, :].contiguous()
-    shift_labels = labels[..., 1:].contiguous()
+    # Work with numpy arrays directly
+    shift_logits = logits[..., :-1, :]
+    shift_labels = labels[..., 1:]
 
     # Flatten for loss computation
-    shift_logits = shift_logits.view(-1, shift_logits.size(-1))
-    shift_labels = shift_labels.view(-1)
+    shift_logits = shift_logits.reshape(-1, shift_logits.shape[-1])
+    shift_labels = shift_labels.reshape(-1)
+
+    # Convert to torch tensors for loss computation
+    shift_logits_tensor = torch.from_numpy(shift_logits).float()
+    shift_labels_tensor = torch.from_numpy(shift_labels).long()
 
     # Compute cross entropy loss (ignore padding tokens if any)
     loss = F.cross_entropy(
-        torch.from_numpy(shift_logits).float(),
-        torch.from_numpy(shift_labels).long(),
+        shift_logits_tensor,
+        shift_labels_tensor,
         ignore_index=-100
     ).item()
 
@@ -110,9 +115,10 @@ def main():
         for warning in warnings:
             logger.warning(f"Pruning config warning: {warning}")
 
-    # Initialize model with pretrained weights
-    model = GPT2LMHeadModel.from_pretrained(config['model']['config_name']).to(device)
-    logger.info(f"Loaded pretrained model: {config['model']['config_name']}")
+    # Initialize model with random weights (not pretrained)
+    model_config = GPT2Config.from_pretrained(config['model']['config_name'])
+    model = GPT2LMHeadModel(model_config).to(device)
+    logger.info(f"Initialized model with random weights using config: {config['model']['config_name']}")
 
     # Optimizer and scheduler
     optimizer = AdamW(

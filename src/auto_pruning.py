@@ -70,6 +70,12 @@ def print_pruning_schedule(config: Dict[str, Any]):
 
     pruning = config.get('pruning', {})
     training = config.get('training', {})
+    mode = config.get('mode', 'none')
+
+    # Skip pruning schedule output for 'none' mode
+    if mode == 'none':
+        logger.info("Mode: 'none' - No pruning will be applied")
+        return
 
     if not pruning.get('_auto_calculated'):
         logger.info("Using manual pruning configuration")
