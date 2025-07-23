@@ -16,16 +16,15 @@ from transformers import get_cosine_schedule_with_warmup, Trainer, TrainingArgum
 from src import (
     WeightPruner,
     ActivationsPruner,
-    GeneralStatisticsCollector,
     MasksStatisticsCollector,
     WeightsStatisticsCollector,
-    WeightsGradientsCollector,
     summarize_statistics,
     load_shakespeare,
     compute_flops,
     load_config,
     get_device,
     setup_logging,
+    setup_wandb,
     auto_configure_pruning,
     print_pruning_schedule,
     validate_pruning_config
@@ -36,7 +35,7 @@ class PruneCallback(TrainerCallback):
     def __init__(self, pruner):
         self.pruner = pruner
 
-        
+
     def on_step_end(self, args, state, control, **kwargs):
         super().on_step_end(args, state, control, **kwargs)
 
@@ -66,6 +65,9 @@ def main():
 
     # Load configuration
     config = load_config(args.config)
+
+    # Setup wandb with token from .env
+    setup_wandb(config)
 
     # Setup logging
     logger = setup_logging(config)
@@ -143,45 +145,29 @@ def main():
             )
         ))
 
-    assert all(callback in ['s-collector', 'g-collector', 'm-collector', 'w-collector'] for callback in config['training']['callbacks']), "Only 's-collector', 'g-collector', 'm-collector' and 'w-collector' callbacks are supported"
+    assert all(callback in ['s-collector', 'm-collector'] for callback in config['training']['callbacks']), "Only 's-collector' and 'm-collector' callbacks are supported"
     s_collector = None
     if 's-collector' in config['training']['callbacks']:
         s_collector = WeightsStatisticsCollector(
             config['collector']['zero_weight_threshold'],
             config['collector']['dead_grad_threshold'],
-            config['collector']['trackable_weights_layers'],
-            config['collector']['collect_frequency'],
+            config['collector'].get('trackable_weights_layers'),
+            config['collector']['s_collect_frequency'],
             config['collector']['dump_frequency'],
-            f"./weights_statistics_collector_output_{config['wandb']['project']}"
+            f"./weights_statistics_collector_output/{config['wandb']['project']}",
+            config['pruning']['warmup_steps'] + 1
         )
         callbacks.append(s_collector)
     m_collector = None
     if 'm-collector' in config['training']['callbacks']:
         m_collector = MasksStatisticsCollector(
-            config['collector']['trackable_weights_layers'],
-            config['collector']['collect_frequency'],
+            config['collector'].get('trackable_masks', None),
+            config['pruning']['prune_freq'],
             config['collector']['dump_frequency'],
-            f"./masks_statistics_collector_output_{config['wandb']['project']}"
+            f"./masks_statistics_collector_output/{config['wandb']['project']}",
+            config['pruning']['warmup_steps'] + 1
         )
         callbacks.append(m_collector)
-    g_collector = None
-    if 'g-collector' in config['training']['callbacks']:
-        g_collector = GeneralStatisticsCollector(
-            s_collector,
-            config['collector']['collect_frequency'],
-            config['collector']['dump_frequency'],
-            f"./general_collector_output_{config['wandb']['project']}"
-        )
-        callbacks.append(g_collector)
-    w_collector = None
-    if 'w-collector' in config['training']['callbacks']:
-        assert Fasle, "Fatal: Using of WeightsGradientsCollector isn't expected during the training proccess. You are probably doing something wrong."
-        w_collector = WeightsGradientsCollector(
-            config['collector']['trackable_weights_layers'],
-            config['collector']['dump_frequency'],
-            f"./weights_collector_output_{config['wandb']['project']}"
-        )
-        callbacks.append(w_collector)
 
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
@@ -204,7 +190,7 @@ def main():
             logging_steps=10,
             run_name=config['wandb']['project'],
             save_steps=1000,
-            eval_steps=5,
+            eval_steps=config['training']['eval_steps'],
             eval_strategy='steps',
             save_total_limit=3,
             fp16=config['training'].get('use_bf16', False),
@@ -220,14 +206,30 @@ def main():
     ).train()
 
     try:
-        stats = summarize_statistics(m_collector, s_collector, w_collector, g_collector)
-        torch.save(stats, os.path.join(str(output_dir), 'collector_data_summary.pt'))
+        stats = summarize_statistics(m_collector, s_collector)
+        run_name = config['wandb']['project']
+        out_path = f'{output_dir}/{run_name}/collector_data_summary.pt'
+        if not os.path.exists(f'{output_dir}/{run_name}'):
+            os.makedirs(f'{output_dir}/{run_name}')
+        torch.save(stats, out_path)
     except Exception as e:
         print(f"Error during data collection: {e}")
 
     flops = compute_flops(model, config['training']['seq_len'], device)
     if flops is not None:
         logger.info(f"Forward pass FLOPs: {flops:,}")
+
+    def infer(model, tokenizer, text):
+        inputs = tokenizer(text, return_tensors="pt").to(model.device)
+        outputs = model.generate(**inputs, max_length=50).cpu()
+        return tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    infer_result = infer(model, tokenizer, config['training']['infer_text'])
+    run_name = config['wandb']['project']
+    if not os.path.exists(f'{output_dir}/{run_name}'):
+        os.makedirs(f'{output_dir}/{run_name}', exist_ok=True)
+    with open(f'{output_dir}/{run_name}/infer_result.txt', 'w') as f:
+        f.write(infer_result)
 
     model.save_pretrained(output_dir)
 

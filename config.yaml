@@ -3,7 +3,7 @@ mode: 'masked-weights' # One of: 'none', 'masked-activations', 'masked-weights',
 
 wandb:
   enabled: true
-  project: 'llm-sparse-research-none'
+  project: 'llm-sparse-research-test'
 
 collector:
   zero_weight_threshold: 0.0
@@ -29,8 +29,9 @@ training:
   batch_size: 8
   seq_len: 128
   lr: 0.00005
-  device: 'cpu'
-  use_bf16: true
+  eval_steps: 100
+  device: 'gpu'
+  use_bf16: false
 
 paths:
   output_dir: './exp'
