@@ -4,6 +4,7 @@ mode: 'masked-weights' # One of: 'none', 'masked-activations', 'masked-weights',
 wandb:
   enabled: true
   project: 'llm-sparse-research-test'
+  offline: false
 
 collector:
   zero_weight_threshold: 0.0

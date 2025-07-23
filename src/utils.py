@@ -27,6 +27,11 @@ def setup_wandb(config: dict) -> None:
     if not config.get('wandb', {}).get('enabled', False):
         return
 
+    # WANDB offline mode
+    if config.get('wandb', {}).get('offline', False):
+        os.environ['WANDB_MODE'] = 'offline'
+        print("WANDB is set to offline mode: logs will be saved locally only.")
+
     # Get wandb token from environment
     wandb_token = os.getenv('WANDB_TOKEN')
     if wandb_token:
