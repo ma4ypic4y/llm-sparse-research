@@ -1,6 +1,6 @@
 from .pruning import WeightPruner, ActivationsPruner
 from .data import load_shakespeare
-from .utils import load_config, compute_flops, get_device, setup_logging, setup_wandb
+from .utils import load_config, compute_flops, get_device, setup_logging
 from .sparsity_utils import (
     calculate_sparsity_stats,
     print_sparsity_report,
@@ -12,6 +12,9 @@ from .auto_pruning import (
     validate_pruning_config
 )
 from .data_collector import MasksStatisticsCollector, WeightsStatisticsCollector, summarize_statistics
+from .data_worker import DataWorker
+from .visualizer import Visualizer
+from .sparsify_activations_layer import replace_linears_with_pruner
 
 __all__ = [
     'WeightPruner',
@@ -19,6 +22,8 @@ __all__ = [
     'MasksStatisticsCollector',
     'WeightsStatisticsCollector',
     'summarize_statistics',
+    'DataWorker',
+    'Visualizer',
     'load_shakespeare',
     'shift_labels',
     'loss_fn',
@@ -27,7 +32,6 @@ __all__ = [
     'compute_flops',
     'get_device',
     'setup_logging',
-    'setup_wandb',
     'PruningMetricsCollector',
     'WeightStabilityTracker',
     'LayerAnalyzer',
@@ -37,5 +41,6 @@ __all__ = [
     'compare_sparsity_targets',
     'auto_configure_pruning',
     'print_pruning_schedule',
-    'validate_pruning_config'
+    'validate_pruning_config',
+    'replace_linears_with_pruner'
 ]

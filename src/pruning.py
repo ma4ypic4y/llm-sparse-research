@@ -89,17 +89,18 @@ class ActivationsPruner:
             return False
 
 
-        # def process_activation(module, input_, output):
-        #     abs_values = torch.abs(output)
-        #     k = int(self.applied * len(abs_values))
-        #     if k:
-        #         threshold = torch.max((torch.topk(abs_values, k=k, largest=False, dim=1)).values).item()
-        #         output.data[torch.abs(output) < threshold] = 0
+        #def process_activation(module, input_, output):
+        #    abs_values = torch.abs(output)
+        #    k = int(self.applied * len(abs_values))
+        #    if k:
+        #        threshold = torch.max((torch.topk(abs_values, k=k, largest=False, dim=1)).values).item()
+        #        output.data[abs_values < threshold] = 0
 
         def process_activation(module, input_, output):
             abs_values = torch.abs(output)
             barier_values = abs_values.type(torch.float32).quantile(inc, dim=1).unsqueeze(dim=1).repeat_interleave(abs_values.shape[1], dim=1)
             output.data[abs_values < barier_values] = 0
+
 
         for hook in self.hidden_layers_hooks:
             hook.remove()

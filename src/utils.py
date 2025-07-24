@@ -1,8 +1,6 @@
 import yaml
 import torch
 import logging
-import os
-from dotenv import load_dotenv
 
 try:
     from ptflops import get_model_complexity_info
@@ -14,35 +12,6 @@ def load_config(config_path: str) -> dict:
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
     return config
-
-
-def setup_wandb(config: dict) -> None:
-    """
-    Setup Weights & Biases with token from .env file
-    """
-    # Load environment variables from .env file
-    load_dotenv('../.env', override=True)
-
-    # Check if wandb is enabled in config
-    if not config.get('wandb', {}).get('enabled', False):
-        return
-
-    # WANDB offline mode
-    if config.get('wandb', {}).get('offline', False):
-        os.environ['WANDB_MODE'] = 'offline'
-        print("WANDB is set to offline mode: logs will be saved locally only.")
-
-    # Get wandb token from environment
-    wandb_token = os.getenv('WANDB_TOKEN')
-    if wandb_token:
-        os.environ['WANDB_API_KEY'] = wandb_token
-        print(f"WANDB_TOKEN loaded from .env file")
-    else:
-        print("Warning: WANDB_TOKEN not found in .env file. Wandb will use default authentication.")
-
-    # Set wandb project name
-    project_name = config.get('wandb', {}).get('project', 'sparse-weights')
-    os.environ['WANDB_PROJECT'] = project_name
 
 
 def compute_flops(model, seq_len: int, device: str):

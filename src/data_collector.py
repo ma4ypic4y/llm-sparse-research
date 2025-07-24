@@ -50,7 +50,7 @@ def _lerp_between(min: float, max: float, between_count: int) -> float:
     return [min + delta * i for i in range(1, between_count + 1)]
 
 
-def _get_weights_distribution_statistics(param: torch.Tensor) -> dict:
+def _get_weights_distribution_statistics(param: torch.Tensor, try_unique_count: bool = False) -> dict:
     """
     Computes distribution statistics for a single parameter tensor.
 
@@ -67,28 +67,37 @@ def _get_weights_distribution_statistics(param: torch.Tensor) -> dict:
     min_val = weights_magnitudes.min().item()
     max_val = weights_magnitudes.max().item()
 
-    mean_minus_std = mean - std
-    mean_plus_std = mean + std
+    if try_unique_count:
+        between_dots, between_dots_cnt = torch.unique(weights_magnitudes, return_counts=True)
 
-    if mean_minus_std < min_val:
-        mean_minus_std = (min_val + mean) / 2
-    if mean_plus_std > max_val:
-        mean_plus_std = (max_val + mean) / 2
+        if len(between_dots) > 13:
+            try_unique_count = False
+        else:
+            between_dots, between_dots_cnt = between_dots.tolist(), between_dots_cnt.tolist()
 
-    distributed_dots = [min_val] + _lerp_between(min_val, mean_minus_std, 2) + [mean_minus_std] + \
-                       _lerp_between(mean_minus_std, mean, 2) + [mean] + _lerp_between(mean, mean_plus_std, 2) + \
-                       [mean_plus_std] + _lerp_between(mean_plus_std, max_val, 2) + [max_val]
-    dots_less_cnt = [
-        (weights_magnitudes < dot).sum().item()
-        for dot in distributed_dots
-    ]
+    if not try_unique_count:
+        mean_minus_std = mean - std
+        mean_plus_std = mean + std
 
-    between_dots = [
-        (dot_r + dot_l) / 2 for dot_l, dot_r in zip(distributed_dots, distributed_dots[1:])
-    ]
-    between_dots_cnt = [
-        dot_r - dot_l for dot_l, dot_r in zip(dots_less_cnt, dots_less_cnt[1:])
-    ]
+        if mean_minus_std < min_val:
+            mean_minus_std = (min_val + mean) / 2
+        if mean_plus_std > max_val:
+            mean_plus_std = (max_val + mean) / 2
+
+        distributed_dots = [min_val] + _lerp_between(min_val, mean_minus_std, 2) + [mean_minus_std] + \
+                        _lerp_between(mean_minus_std, mean, 2) + [mean] + _lerp_between(mean, mean_plus_std, 2) + \
+                        [mean_plus_std] + _lerp_between(mean_plus_std, max_val, 2) + [max_val]
+        dots_less_cnt = [
+            (weights_magnitudes < dot).sum().item()
+            for dot in distributed_dots
+        ]
+
+        between_dots = [
+            (dot_r + dot_l) / 2 for dot_l, dot_r in zip(distributed_dots, distributed_dots[1:])
+        ]
+        between_dots_cnt = [
+            dot_r - dot_l for dot_l, dot_r in zip(dots_less_cnt, dots_less_cnt[1:])
+        ]
 
     return {
         'mean': mean,
@@ -182,7 +191,7 @@ class BaseCollector(transformers.TrainerCallback):
         """
         super().on_optimizer_step(args, state, control, **kwargs)
 
-        if self.warmup_steps > 0 and state.global_step < self.warmup_steps:
+        if state.global_step < self.warmup_steps:
             return
 
         # Working with trackable weights
@@ -208,7 +217,6 @@ class BaseCollector(transformers.TrainerCallback):
         """
         super().on_train_end(args, state, control, **kwargs)
 
-        self._collect_data()
         self._dump_data(state)
 
 
@@ -281,7 +289,7 @@ class MasksStatisticsCollector(BaseCollector):
             for name, param in tqdm(model.named_buffers()):
                 if name.endswith("_mask"):
                     self.trackable_layers_names.append(name)
-                    self.prev_masks.append(param.data.clone())
+                    self.prev_masks.append(torch.ones_like(param.data))
                     self.masks_changes.append(torch.zeros_like(param.data, dtype=mask_type))
 
         print(f"Tracking masks for layers: {self.trackable_layers_names}")
@@ -302,7 +310,7 @@ class MasksStatisticsCollector(BaseCollector):
             changes = turned_on_mask | turned_off_mask
 
             mask_change += changes
-            prev_mask = mask.data.clone()
+            prev_mask.copy_(mask.data)
 
             masks_statistic[name] = {
                 'prune_amount': 1.0 - mask.mean().item(),
@@ -459,12 +467,12 @@ def summarize_statistics(
 
     weights_statistics = []
     if weights_collector is not None:
-        if weights_collector.output_dir is not None:
+        if weights_collector.output_dir is not None and os.path.exists(weights_collector.output_dir):
             for file in os.listdir(weights_collector.output_dir):
                 if not file.endswith(".pt") or file == "collector_data_summary.pt":
                     continue
 
-                data = torch.load(os.path.join(weights_collector.output_dir, file), map_location='cpu')
+                data = torch.load(os.path.join(weights_collector.output_dir, file))
 
                 weights_statistics += data['weights_statistics']
 
@@ -473,24 +481,24 @@ def summarize_statistics(
     mask_changes = {}
     masks_statistics = []
     if masks_collector is not None and masks_collector.trackable_layers_names is not None:
-        masks_changes = [torch.zeros_like(mask, dtype=mask.dtype) for mask in masks_collector.masks_changes]
+        masks_changes = [torch.zeros_like(mask, dtype=torch.int64, device='cpu') for mask in masks_collector.masks_changes]
+        device_location = masks_collector.masks_changes[0].device
 
-        if masks_collector.output_dir is not None:
+        if masks_collector.output_dir is not None and os.path.exists(masks_collector.output_dir):
             for file in os.listdir(masks_collector.output_dir):
                 if not file.endswith(".pt") or file == "collector_data_summary.pt":
                     continue
 
                 data = torch.load(os.path.join(masks_collector.output_dir, file), map_location='cpu')
-                print(data)
 
                 for idx, mask_change in enumerate(data['masks_changes']):
-                    masks_changes[idx] += mask_change
+                    masks_changes[idx] += mask_change.type(torch.int64)
                 masks_statistics += data['masks_statistics']
 
         for idx, mask_change in enumerate(masks_collector.masks_changes):
-            masks_changes[idx] += mask_change
+            masks_changes[idx] += mask_change.cpu().type(torch.int64)
 
-        mask_changes = {name: change for name, change in zip(masks_collector.trackable_layers_names, masks_changes)}
+        mask_changes = {name: change.cpu() for name, change in zip(masks_collector.trackable_layers_names, masks_changes)}
         masks_statistics += masks_collector.masks_statistics
 
     return {
@@ -500,5 +508,7 @@ def summarize_statistics(
         'info': {
             'masks_collector_frequency': masks_collector.collect_frequency if masks_collector is not None else None,
             'weights_collector_frequency': weights_collector.collect_frequency if weights_collector is not None else None,
+            'masks_collector_warmup_steps': masks_collector.warmup_steps if masks_collector is not None else None,
+            'weights_collector_warmup_steps': weights_collector.warmup_steps if weights_collector is not None else None,
         },
     }
