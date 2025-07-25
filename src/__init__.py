@@ -1,6 +1,7 @@
-from .pruning import WeightPruner, ActivationsPruner
-from .data import load_shakespeare
+from .pruning import PruneCallback, make_prune_strategy
+from .data import load_shakespeare, load_wikitext, load_red_pajama
 from .utils import load_config, compute_flops, get_device, setup_logging
+from .evaluate import PerplexityEvaluator, Summarize, infer_model
 from .sparsity_utils import (
     calculate_sparsity_stats,
     print_sparsity_report,
@@ -14,17 +15,23 @@ from .auto_pruning import (
 from .data_collector import MasksStatisticsCollector, WeightsStatisticsCollector, summarize_statistics
 from .data_worker import DataWorker
 from .visualizer import Visualizer
-from .sparsify_activations_layer import replace_linears_with_pruner
+from .training import configure_optimizer
+from .nanoGPT import GPT as nanoGPT, GPTConfig as nanoGPTConfig
 
 __all__ = [
-    'WeightPruner',
-    'ActivationsPruner',
+    'PruneCallback',
+    'make_prune_strategy',
+    'PerplexityEvaluator',
+    'Summarize',
+    'infer_model',
     'MasksStatisticsCollector',
     'WeightsStatisticsCollector',
     'summarize_statistics',
     'DataWorker',
     'Visualizer',
     'load_shakespeare',
+    'load_wikitext',
+    'load_red_pajama',
     'shift_labels',
     'loss_fn',
     'evaluate',
@@ -42,5 +49,7 @@ __all__ = [
     'auto_configure_pruning',
     'print_pruning_schedule',
     'validate_pruning_config',
-    'replace_linears_with_pruner'
+    'configure_optimizer',
+    'nanoGPT',
+    'nanoGPTConfig',
 ]

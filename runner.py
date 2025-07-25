@@ -11,19 +11,25 @@ import math
 
 import torch
 import torch.nn.functional as F
-from transformers import GPT2Tokenizer, GPTNeoConfig, GPTNeoForCausalLM
 from torch.optim import AdamW
 from transformers import get_cosine_schedule_with_warmup, Trainer, TrainingArguments, TrainerCallback, DataCollatorForLanguageModeling
+from transformers import AutoTokenizer, GPT2Tokenizer, GPTNeoConfig, GPTNeoForCausalLM, GPT2Config, GPT2LMHeadModel
+from transformers.trainer_pt_utils import LabelSmoother
 
 from src import (
-    WeightPruner,
-    ActivationsPruner,
+    PruneCallback,
+    make_prune_strategy,
+    PerplexityEvaluator,
+    Summarize,
+    infer_model,
     MasksStatisticsCollector,
     WeightsStatisticsCollector,
     summarize_statistics,
     DataWorker,
     Visualizer,
     load_shakespeare,
+    load_wikitext,
+    load_red_pajama,
     compute_flops,
     load_config,
     get_device,
@@ -31,32 +37,10 @@ from src import (
     auto_configure_pruning,
     print_pruning_schedule,
     validate_pruning_config,
-    replace_linears_with_pruner
+    configure_optimizer,
+    nanoGPT,
+    nanoGPTConfig
 )
-
-
-class PruneCallback(TrainerCallback):
-    def __init__(self, pruner):
-        self.pruner = pruner
-
-
-    def on_step_begin(self, args, state, control, **kwargs):
-        super().on_step_end(args, state, control, **kwargs)
-
-        self.pruner(state.global_step)
-
-eval_metrics = [] # FIXME: temporary solution to make plots on server
-
-def eval_metric(eval_preds):
-    logits, labels = eval_preds.predictions, eval_preds.label_ids
-
-    shift_logits = logits[:, :-1, :].reshape(-1, logits.shape[-1])
-    shift_labels = labels[:, 1:].reshape(-1)
-    loss = F.cross_entropy(torch.tensor(shift_logits), torch.tensor(shift_labels)).item()
-
-    perplexity = math.exp(loss) if loss < 300 else float("inf")
-    eval_metrics.append(perplexity)
-    return {"perplexity": perplexity}
 
 
 def main():
@@ -82,18 +66,33 @@ def main():
 
     # Initialize tokenizer
     tokenizer = GPT2Tokenizer.from_pretrained(config['model']['tokenizer_name'])
+    # tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
     tokenizer.pad_token = tokenizer.eos_token
 
     # Load data
     logger.info("Loading data...")
-    train_loader, val_loader = load_shakespeare(
-        config['training']['batch_size'],
-        config['training']['seq_len'],
-        tokenizer
-    )
+    assert config['training']['dataset'] in ['shakespeare', 'wikitext', 'red_pajama'], "Only 'shakespeare', 'wikitext' and 'red_pajama' datasets are currently supported"
+    if config['training']['dataset'] == 'shakespeare':
+        train_loader, val_loader = load_shakespeare(
+            config['training']['batch_size'],
+            config['training']['seq_len'],
+            tokenizer
+        )
+    elif config['training']['dataset'] == 'wikitext':
+        train_loader, val_loader = load_wikitext(
+            config['training']['batch_size'],
+            config['training']['seq_len'],
+            tokenizer
+        )
+    elif config['training']['dataset'] == 'red_pajama':
+        train_loader, val_loader = load_red_pajama(
+            config['training']['batch_size'],
+            config['training']['seq_len'],
+            tokenizer
+        )
 
     # Auto-configure pruning parameters
-    config = auto_configure_pruning(config, train_loader)
+    config = auto_configure_pruning(config, len(train_loader))
     print_pruning_schedule(config)
 
     # Validate pruning configuration
@@ -102,73 +101,40 @@ def main():
         for warning in warnings:
             logger.warning(f"Pruning config warning: {warning}")
 
-        # Initialize model
-    # Используем предустановленную конфигурацию GPT Neo 125M и модифицируем её
-    model_config = GPTNeoConfig.from_pretrained("EleutherAI/gpt-neo-125M")
-
-    # Обновляем параметры из нашей конфигурации
-    model_config.vocab_size = tokenizer.vocab_size
-    model_config.max_position_embeddings = config['training']['seq_len']
-    model_config.hidden_size = config['model'].get('hidden_size', model_config.hidden_size)
-    model_config.num_heads = config['model'].get('num_heads', model_config.num_heads)
-
-    # Для упрощения оставляем оригинальное количество слоев из предустановленной конфигурации
-    # или используем минимальное рабочее количество
-    if 'num_layers' in config['model']:
-        logger.warning(f"Using original num_layers={model_config.num_layers} instead of configured {config['model']['num_layers']} to avoid attention_types configuration issues")
-
-    model = GPTNeoForCausalLM(model_config).to(device)
+    # Initialize model
+    assert config['model']['config_name'] in ['gpt2', 'nanoGPT', 'neoGPT'], "Only 'gpt2', 'nanoGPT' and 'neoGPT' models are currently supported"
+    if config['model']['config_name'] == 'gpt2':
+        model_config = GPT2Config()
+        model = GPT2LMHeadModel(model_config).to(device)
+    elif config['model']['config_name'] == 'nanoGPT':
+        model_config = nanoGPTConfig()
+        model = nanoGPT(model_config).to(device)
+    elif config['model']['config_name'] == 'neoGPT':
+        model_config = GPTNeoConfig.from_pretrained("EleutherAI/gpt-neo-125M")
+        model = GPTNeoForCausalLM(model_config).to(device)
 
     # Initialize pruner with metrics collector
     output_dir = Path(config['paths']['output_dir'])
 
     callbacks = []
-    assert config['mode'] in ['none', 'masked-weights', 'masked-activations', 'masked-activations-layer'], "Only 'none', 'masked-weights', 'masked-activations' and 'masked-activations-layer' modes are currently supported"
 
-    # Если используется режим masked-activations-layer, заменяем все Linear слои на LinearActivationsPruner
-    if config['mode'] == 'masked-activations-layer':
-        logger.info("Replacing all nn.Linear layers with LinearActivationsPruner...")
-        replace_linears_with_pruner(model, config['pruning']['target_sparsity'])
-        logger.info("Layer replacement completed.")
+    mode_to_prune_strategy = {
+        'none': 'none',
+        'masked-weights': 'global-weight',
+        'masked-activations': 'layer-activation-v1',
+        'masked-activations-layer': 'layer-activation-v2',
+    }
+    assert config['mode'] in list(mode_to_prune_strategy.keys()), f"Only {list(mode_to_prune_strategy.keys())} modes are currently supported"
+    callbacks.append(PruneCallback(
+        model,
+        make_prune_strategy(mode_to_prune_strategy[config['mode']]),
+        config['pruning']['target_sparsity'],
+        config['pruning']['warmup_steps'],
+        config['pruning']['final_prune_step'],
+        config['pruning']['prune_freq'],
+    ))
 
-    # Optimizer and scheduler (создаем ПОСЛЕ замены слоев для правильных параметров)
-    optimizer = AdamW(
-        model.parameters(),
-        lr=config['training']['lr'],
-        weight_decay=0.01,
-        betas=(0.9, 0.999),
-        eps=1e-8
-    )
-
-    total_steps = config['training']['epochs'] * len(train_loader)
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=math.ceil(0.1 * total_steps), # Use separate warmup for LR (10% of total steps is common)
-        num_training_steps=total_steps,
-    )
-
-    if config['mode'] == 'masked-weights':
-        callbacks.append(PruneCallback(
-            WeightPruner(
-                model,
-                config['pruning']['target_sparsity'],
-                config['pruning']['warmup_steps'],
-                config['pruning']['final_prune_step'],
-                config['pruning']['prune_freq'],
-            )
-        ))
-    elif config['mode'] == 'masked-activations':
-        callbacks.append(PruneCallback(
-            ActivationsPruner(
-                model,
-                config['pruning']['target_sparsity'],
-                config['pruning']['warmup_steps'],
-                config['pruning']['final_prune_step'],
-                config['pruning']['prune_freq'],
-            )
-        ))
-
-    run_name = f"llm-sparse-research-{config['mode']}"
+    run_name = f"{config['model']['config_name']}-{config['training']['dataset']}-{config['mode']}"
     if config['mode'] != 'none':
         run_name += f"-{config['pruning']['target_sparsity']}"
 
@@ -182,11 +148,11 @@ def main():
             config['collector']['s_collect_frequency'],
             config['collector']['dump_frequency'],
             f"./weights_statistics_collector_output/{run_name}",
-            config['pruning']['warmup_steps']
+            config['pruning']['warmup_steps'] + 6
         )
         callbacks.append(s_collector)
     m_collector = None
-    if 'm-collector' in config['training']['callbacks']:
+    if 'm-collector' in config['training']['callbacks'] and config['mode'] in ['masked-weights']:
         m_collector = MasksStatisticsCollector(
             config['collector'].get('trackable_masks', None),
             config['pruning']['prune_freq'],
@@ -198,8 +164,14 @@ def main():
 
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
-        mlm=False,  # GPT Neo does not use masked language modeling
+        mlm=False,  # GPT-2 does not use masked language modeling
     )
+
+    evaluator = PerplexityEvaluator()
+
+    optimizer = configure_optimizer(config['training'], model.parameters(), len(train_loader))
+    label_smoother = LabelSmoother(epsilon=0.0)
+    loss_fn = lambda outputs, labels, num_items_in_batch: label_smoother(outputs, labels)
 
     Trainer(
         model=model,
@@ -216,19 +188,22 @@ def main():
             logging_dir=str(output_dir / 'logs'),
             logging_steps=10,
             run_name=run_name,
-            save_steps=1000,
+            save_steps=99999,
+            save_strategy="no",
             eval_steps=config['training']['eval_steps'],
             eval_strategy='steps',
             save_total_limit=3,
             fp16=config['training'].get('use_bf16', False),
             max_grad_norm=1.0,
             report_to=config['training']['report_to'],
+            # no_cuda=True,
         ),
         data_collator=data_collator,
         train_dataset=train_loader.dataset,
         eval_dataset=val_loader.dataset,
-        compute_metrics=eval_metric,
-        optimizers=(optimizer, scheduler),
+        compute_metrics=evaluator.evaluate,
+        # compute_loss_func=loss_fn,
+        optimizers=optimizer,
         callbacks=callbacks,
     ).train()
 
@@ -236,73 +211,23 @@ def main():
     if flops is not None:
         logger.info(f"Forward pass FLOPs: {flops:,}")
 
-    model.save_pretrained(output_dir)
+    # model.save_pretrained(output_dir)
 
     logger.info(f"Everythink done! Making summarization....")
 
     summary_dir = Path(config['paths']['summary_dir'])
-    stats = None
-    try:
-        stats = summarize_statistics(m_collector, s_collector)
-        run_name = run_name
-        out_path = f'{summary_dir}/{run_name}/collector_data_summary.pt'
-        if not os.path.exists(f'{summary_dir}/{run_name}'):
-            os.makedirs(f'{summary_dir}/{run_name}')
-        torch.save(stats, out_path)
-    except Exception as e:
-        logger.error(f"Error during data collection: {e}")
 
-    def infer(model, tokenizer, text):
-        inputs = tokenizer(text, return_tensors="pt").to(model.device)
-        outputs = model.generate(**inputs, max_length=50).cpu()
-        return tokenizer.decode(outputs[0], skip_special_tokens=True)
+    summarizer = Summarize(f'{summary_dir}/{run_name}', s_collector, m_collector, evaluator)
+    summarizer.make_summarization('collector_data_summary.pt')
 
-    infer_result = infer(model, tokenizer, config['training']['infer_text'])
+    infer_result = infer_model(model, tokenizer, config['training']['infer_text'])
     if not os.path.exists(f'{summary_dir}/{run_name}'):
         os.makedirs(f'{summary_dir}/{run_name}', exist_ok=True)
     with open(f'{summary_dir}/{run_name}/infer_result.txt', 'w') as f:
         f.write(infer_result)
 
     logger.info(f"Making plots....")
-
-    if stats is not None:
-        try:
-            plt.plot([i * config['training']['eval_steps'] for i in range(len(eval_metrics))], eval_metrics)
-            plt.title("Perplexity")
-            plt.xlabel("Step")
-            plt.ylabel("Perplexity value")
-            plt.gca().set_yscale('log')
-            plt.savefig(f"{summary_dir}/{run_name}/perplexity.png", dpi=300, bbox_inches='tight')
-
-            worker = DataWorker().load_stats(stats)
-            visualizer = Visualizer(worker)
-
-            if s_collector is not None:
-                visualizer.visualize_weights_statistics(sort_by='depth', slice_direction='layers', slice_position=-1)
-                plt.savefig(f"{summary_dir}/{run_name}/zero-dead-prune-end.png", dpi=300, bbox_inches='tight')
-
-                visualizer.visualize_weights_statistics(sort_by='depth', slice_direction='layers', slice_position=0)
-                plt.savefig(f"{summary_dir}/{run_name}/zero-dead-prune-begin.png", dpi=300, bbox_inches='tight')
-
-                visualizer.visualize_weights_distribution(weights_transform='abs_log', sort_by='layer_type', plot_type='violine', slice_direction='layers', slice_position=-1)
-                plt.savefig(f"{summary_dir}/{run_name}/weights-prune-end.png", dpi=300, bbox_inches='tight')
-
-                visualizer.visualize_weights_distribution(weights_transform='abs_log', sort_by='layer_type', plot_type='violine', slice_direction='layers', slice_position=0)
-                plt.savefig(f"{summary_dir}/{run_name}/weights-prune-begin.png", dpi=300, bbox_inches='tight')
-
-            if m_collector is not None:
-                visualizer.visualize_masks_summary_statistics(sort_by='depth', slice_direction='layers')
-                plt.savefig(f"{summary_dir}/{run_name}/masks-summary-layers.png", dpi=300, bbox_inches='tight')
-
-                visualizer.visualize_masks_summary_statistics(sort_by='depth', slice_direction='steps')
-                plt.savefig(f"{summary_dir}/{run_name}/masks-summary-steps.png", dpi=300, bbox_inches='tight')
-
-                visualizer.visualize_masks_flick_distribution(weights_transform='norm', sort_by='depth', plot_type='violine')
-                plt.savefig(f"{summary_dir}/{run_name}/masks-flick-distribution.png", dpi=300, bbox_inches='tight')
-        except Exception as e:
-            logger.error(f"Error during data collection: {e}")
-    else:
-        logger.error(f"No stats to make plots")
+    summarizer.make_plots()
 
     logger.info(f"Done!")
 

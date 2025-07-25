@@ -66,6 +66,9 @@ class LinearActivationsPruner(nn.Module):
 
         return output
 
+    def set_sparsity_ratio(self, sparsity_ratio):
+        self.sparsity_ratio = sparsity_ratio
+
     @classmethod
     def from_original(
         cls,
@@ -111,6 +114,8 @@ def replace_linears_with_pruner(module, sparsity_ratio):
                 name=name
             ).to(child.weight.device)
             setattr(module, name, pruner)
+        elif isinstance(child, LinearActivationsPruner):
+            child.set_sparsity_ratio(sparsity_ratio)
         else:
             # Иначе рекурсивно смотрим глубже
             replace_linears_with_pruner(child, sparsity_ratio)

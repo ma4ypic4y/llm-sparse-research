@@ -25,14 +25,14 @@ def calculate_pruning_schedule(
     return warmup_steps, final_prune_step, prune_freq
 
 
-def auto_configure_pruning(config: Dict[str, Any], train_loader: DataLoader) -> Dict[str, Any]:
+def auto_configure_pruning(config: Dict[str, Any], train_data_count: int) -> Dict[str, Any]:
     """Automatically configure pruning parameters based on training setup"""
     logger = logging.getLogger('sparse_weights.auto_pruning')
 
     training_config = config.get('training', {})
     epochs = training_config.get('epochs', 10)
 
-    batches_per_epoch = len(train_loader)
+    batches_per_epoch = train_data_count
     total_steps = epochs * batches_per_epoch
 
     logger.info(f"Training setup: {epochs} epochs, {batches_per_epoch} batches/epoch, {total_steps} total steps")

@@ -1,29 +1,3 @@
-# Sparse Weights Research
-
-## Setup
-
-### Weights & Biases Integration
-
-This project supports Weights & Biases (wandb) for experiment tracking. To enable wandb:
-
-1. Create a `.env` file in the project root (see `env_example.txt` for reference):
-```bash
-# Weights & Biases API Token
-# Get your token from https://wandb.ai/settings
-WANDB_TOKEN=your_wandb_token_here
-```
-
-2. Enable wandb in your `config.yaml`:
-```yaml
-wandb:
-  enabled: true
-  project: 'your-project-name'
-```
-
-3. The token will be automatically loaded from the `.env` file when wandb is enabled.
-
-## Running Experiments
-
 Run experiments (for different sparsity levels):
 ```bash
 chmod +x run_experiments.sh
