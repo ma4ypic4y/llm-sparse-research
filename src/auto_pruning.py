@@ -9,31 +9,30 @@ def calculate_pruning_schedule(
     total_steps: int,
     warmup_ratio: float = 0.15,
     final_prune_ratio: float = 0.85,
-    prune_applications: int = 10
+    prune_applications: int | None = 10
 ) -> Tuple[int, int, int]:
     """Calculate pruning parameters based on total training steps"""
 
     warmup_steps = max(1, int(total_steps * warmup_ratio))
     final_prune_step = int(total_steps * final_prune_ratio)
 
-    pruning_steps = final_prune_step - warmup_steps
+    assert prune_applications >= 0, "prune_applications must be non-negative"
+    if prune_applications is None:
+        prune_applications = 10
 
-    if prune_applications > 0:
-        prune_freq = max(1, pruning_steps // prune_applications)
-    else:
-        prune_freq = pruning_steps // 10
+    prune_freq = max(1, (final_prune_step - warmup_steps) // prune_applications)
 
     return warmup_steps, final_prune_step, prune_freq
 
 
-def auto_configure_pruning(config: Dict[str, Any], train_loader: DataLoader) -> Dict[str, Any]:
+def auto_configure_pruning(config: Dict[str, Any], train_data_count: int) -> Dict[str, Any]:
     """Automatically configure pruning parameters based on training setup"""
     logger = logging.getLogger('sparse_weights.auto_pruning')
 
     training_config = config.get('training', {})
     epochs = training_config.get('epochs', 10)
 
-    batches_per_epoch = len(train_loader)
+    batches_per_epoch = train_data_count
     total_steps = epochs * batches_per_epoch
 
     logger.info(f"Training setup: {epochs} epochs, {batches_per_epoch} batches/epoch, {total_steps} total steps")

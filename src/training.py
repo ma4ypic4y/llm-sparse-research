@@ -1,33 +1,22 @@
 import math
-import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
 
+from torch.optim import AdamW
+from transformers import get_cosine_schedule_with_warmup
 
-def shift_labels(x):
-    return x[:, 1:].contiguous()
-
-
-def loss_fn(logits, labels):
-    return F.cross_entropy(
-        logits.view(-1, logits.size(-1)),
-        labels.view(-1)
+def configure_optimizer(config, params, data_len: int):
+    optimizer = AdamW(
+        params,
+        lr=config['lr'],
+        weight_decay=0.01,
+        betas=(0.9, 0.999),
+        eps=1e-8
     )
 
+    total_steps = config['epochs'] * data_len
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=math.ceil(0.1 * total_steps), # Use separate warmup for LR (10% of total steps is common)
+        num_training_steps=total_steps,
+    )
 
-def evaluate(model, val_loader: DataLoader, device: str):
-    model.eval()
-    total_loss = 0
-    num_batches = 0
-
-    with torch.no_grad():
-        for batch in val_loader:
-            ids = batch['input_ids'].to(device)
-            logits = model(ids[:, :-1]).logits
-            labels = shift_labels(ids)
-            loss = loss_fn(logits, labels)
-            total_loss += loss.item()
-            num_batches += 1
-
-    avg_loss = total_loss / num_batches
-    return math.exp(avg_loss)
+    return optimizer, scheduler

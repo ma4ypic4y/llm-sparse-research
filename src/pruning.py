@@ -1,99 +1,144 @@
+import torch
 import torch.nn as nn
-import wandb
+from torch.nn.utils import prune
+from transformers import pytorch_utils, TrainerCallback
 from typing import Optional
-from .metrics import PruningMetricsCollector
+
+from .sparsify_activations_layer import replace_linears_with_pruner
 
 
-class WeightPruner:
-    def __init__(self, model: nn.Module, target_sparsity: float,
-                 warmup_steps: int, final_prune_step: int, prune_freq: int,
-                 metrics_collector: Optional[PruningMetricsCollector] = None):
-        from torch.nn.utils import prune
+### Strategies ###
 
-        self.to_prune = [(m, 'weight') for m in model.modules()
-                        if isinstance(m, (nn.Linear, nn.Conv2d))]
-        self.prune = prune
+class PruneStategy:
+    def __init__(self):
+        self.name = "empty-stategy"
+        self.module = None
+
+    def set_prunable_module(self, module: nn.Module):
+        self.module = module
+
+    def __call__(self, target_sparsity: float):
+        pass
+
+class GlobalWeightPruneStategy(PruneStategy):
+    def __init__(self):
+        self.name = "global-weight"
+
+        self.applied = 0.0
+        self.to_prune = []
+
+    def set_prunable_module(self, module: nn.Module):
+        super().set_prunable_module(module)
+
+        self.to_prune = [(m, 'weight') for m in module.modules() if isinstance(m, (nn.Linear, nn.Conv2d, nn.Conv1d, pytorch_utils.Conv1D))]
+
+    def __call__(self, target_sparsity: float):
+        inc = target_sparsity - self.applied
+
+        if inc <= 0:
+            return
+
+        prune.global_unstructured(
+            self.to_prune,
+            pruning_method=prune.L1Unstructured,
+            amount=inc
+        )
+
+        self.applied = target_sparsity
+
+class LayerActivationV1PruneStategy(PruneStategy):
+    def __init__(self):
+        self.name = "layer-activation-v1"
+
+        self.hidden_layers_hooks = []
+        self.to_prune = []
+
+    def set_prunable_module(self, module: nn.Module):
+        super().set_prunable_module(module)
+
+        self.to_prune = [m for m in module.modules() if isinstance(m, (nn.Linear, nn.Conv2d, nn.Conv1d, pytorch_utils.Conv1D))]
+
+    def __call__(self, target_sparsity: float):
+        #def process_activation(module, input_, output):
+        #    abs_values = torch.abs(output)
+        #    k = int(target_sparsity * len(abs_values))
+        #    if k:
+        #        threshold = torch.max((torch.topk(abs_values, k=k, largest=False, dim=1)).values).item()
+        #        output.data[abs_values < threshold] = 0
+
+        def process_activation(module, input_, output):
+            abs_values = torch.abs(output)
+            barier_values = abs_values.type(torch.float32).quantile(target_sparsity, dim=1).unsqueeze(dim=1).repeat_interleave(abs_values.shape[1], dim=1)
+            output.data[abs_values < barier_values] = 0
+
+        for hook in self.hidden_layers_hooks:
+            hook.remove()
+        for param in self.to_prune:
+            self.hidden_layers_hooks.append(param.register_forward_hook(process_activation))
+
+class LayerActivationV2PruneStategy(PruneStategy):
+    def __init__(self):
+        self.name = "layer-activation-v2"
+
+    def __call__(self, target_sparsity: float):
+        replace_linears_with_pruner(
+            self.module,
+            sparsity_ratio=target_sparsity
+        )
+
+### Strategy factory ###
+
+def make_prune_strategy(name: str):
+    strategies_dict = {
+        "none": PruneStategy(),
+        "global-weight": GlobalWeightPruneStategy(),
+        "layer-activation-v1": LayerActivationV1PruneStategy(),
+        "layer-activation-v2": LayerActivationV2PruneStategy(),
+    }
+    return strategies_dict[name]
+
+### Pruner ###
+
+class PruneCallback(TrainerCallback):
+    def __init__(self, model: nn.Module, strategy: PruneStategy, target_sparsity: float,
+                 warmup_steps: int, final_prune_step: int, prune_freq: int):
+        self.strategy = strategy
+
         self.target = target_sparsity
         self.warmup = warmup_steps
         self.final = final_prune_step
         self.freq = prune_freq
+
+        self.pruning_history = []
+
         self.applied = 0.0
 
-        self.metrics_collector = metrics_collector or PruningMetricsCollector()
-        self.pruning_history = []
-        self.step_sparsities = {}
+        self.strategy.set_prunable_module(model)
 
-    def __call__(self, step: int, model: nn.Module):
-        if step % self.freq == 0 or step == self.warmup:
-            pre_prune_stats = self.metrics_collector.collect_all_metrics(
-                model, step, log_to_wandb=False
-            )
 
-        prune_applied = self._apply_pruning(step)
+    def on_step_begin(self, args, state, control, **kwargs):
+        super().on_step_end(args, state, control, **kwargs)
 
-        post_prune_stats = self.metrics_collector.collect_all_metrics(
-            model, step, log_to_wandb=True
-        )
+        if state.global_step < self.warmup or state.global_step % self.freq != 0:
+            return
 
-        self._log_pruning_stats(step, prune_applied, post_prune_stats)
-        return post_prune_stats
-
-    def _apply_pruning(self, step: int) -> bool:
-        """Apply pruning and return True if pruning was applied"""
-        if step < self.warmup or step % self.freq != 0:
-            return False
-
-        progress = min(1.0, (step - self.warmup) / (self.final - self.warmup))
+        progress = min(1.0, (state.global_step - self.warmup) / (self.final - self.warmup))
         desired = progress * self.target
         inc = desired - self.applied
 
         if inc <= 0:
-            return False
+            return
 
-        self.prune.global_unstructured(
-            self.to_prune,
-            pruning_method=self.prune.L1Unstructured,
-            amount=inc
-        )
+        self.strategy(desired)
 
         self.applied = desired
 
         self.pruning_history.append({
-            'step': step,
+            'step': state.global_step,
             'sparsity_increase': inc,
             'total_sparsity': desired,
             'progress': progress
         })
-
-        return True
-
-    def _log_pruning_stats(self, step: int, prune_applied: bool, stats: dict):
-        """Log pruning statistics"""
-        total = 0
-        zero = 0
-        for m, _ in self.to_prune:
-            tensor = m.weight.data
-            total += tensor.numel()
-            zero += int((tensor == 0).sum())
-        sparsity = zero / total
-
-        self.step_sparsities[step] = sparsity
-
-        pruning_stats = {
-            'pruning/sparsity': sparsity,
-            'pruning/target_sparsity': self.target,
-            'pruning/applied_sparsity': self.applied,
-            'pruning/prune_applied': int(prune_applied)
-        }
-
-        if len(self.step_sparsities) >= 2:
-            recent_steps = sorted(self.step_sparsities.keys())[-5:]
-            if len(recent_steps) >= 2:
-                sparsity_values = [self.step_sparsities[s] for s in recent_steps]
-                sparsity_growth_rate = (sparsity_values[-1] - sparsity_values[0]) / len(recent_steps)
-                pruning_stats['pruning/sparsity_growth_rate'] = sparsity_growth_rate
-
-        wandb.log(pruning_stats, step=step)
 
     def get_pruning_summary(self) -> dict:
         """Return pruning process summary"""
