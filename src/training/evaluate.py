@@ -6,9 +6,8 @@ import torch.nn.functional as F
 
 import matplotlib.pyplot as plt
 
-from .data_collector import summarize_statistics
-from .data_worker import DataWorker
-from .visualizer import Visualizer
+from ..hooks import summarize_statistics
+from ..visualization import Visualizer, DataWorker
 
 class PerplexityEvaluator:
     def __init__(self, eval_steps: int = 1):
@@ -18,8 +17,8 @@ class PerplexityEvaluator:
     def evaluate(self, eval_preds):
         logits, labels = eval_preds.predictions, eval_preds.label_ids
 
-        shift_logits = logits[:, :-1, :].reshape(-1, logits.shape[-1])
-        shift_labels = labels[:, 1:].reshape(-1)
+        shift_logits = logits.view(-1, logits.size(-1))
+        shift_labels = labels.view(-1)
         loss = F.cross_entropy(torch.tensor(shift_logits), torch.tensor(shift_labels), ignore_index=-100).item()
 
         perplexity = math.exp(loss) if loss < 300 else float("inf")
@@ -106,6 +105,6 @@ class Summarize:
 
 def infer_model(model, tokenizer, text):
     inputs = tokenizer(text, return_tensors="pt").to(next(model.parameters()).device)
-    outputs = model.generate(**inputs, max_length=50).cpu()
+    outputs = model.generate(**inputs, max_length=500, top_k=200, temperature=0.8).cpu()
     return tokenizer.decode(outputs[0], skip_special_tokens=True)
 

@@ -11,8 +11,8 @@ import torch
 from scipy.stats import gaussian_kde
 import numpy as np
 
-from src.data_collector import _get_weights_distribution_statistics
-from src.data_worker import DataWorker
+from ..hooks.data_collector import _get_weights_distribution_statistics
+from .data_worker import DataWorker
 
 
 class Visualizer:
@@ -106,7 +106,7 @@ class Visualizer:
         sns.histplot(
             x=layer_names, hue=weight_states, weights=counts,
             multiple="stack",
-            palette="light:b",
+            palette=sns.color_palette("husl", 8)[3::-1],
             edgecolor=".3",
             linewidth=.5,
             bins=len(layers)

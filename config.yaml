@@ -1,5 +1,5 @@
 # Configuration for sparse weights training
-mode: 'masked-weights' # 'none' | 'masked-activations' | 'masked-weights' | 'masked-activations-layer'
+mode: 'none' # 'none' | 'masked-activations' | 'masked-weights' | 'masked-activations-layer'
 
 collector:
   zero_weight_threshold: 0.0
@@ -19,15 +19,16 @@ pruning:
 training:
   callbacks: ['s-collector', 'm-collector'] # 's-collector', 'm-collector' | weights statistics collector; masks statistics collector
   report_to: ['wandb'] # 'wandb'
-  epochs: 3
+  epochs: 1
   batch_size: 64
+  gradient_accumulation_steps: 1
   seq_len: 256
-  lr: 0.0001
+  lr: 0.0005
   device: 'cuda'
   use_bf16: true
-  eval_steps: 10
-  infer_text: 'To be, or not to be'
-  dataset: 'shakespeare' # Only 'shakespeare' | 'wikitext' | 'red_pajama'
+  eval_steps: 250
+  infer_text: 'To be or not to be'
+  dataset: 'shakespeare' # 'shakespeare' | 'wikitext' | 'red_pajama'
 
 paths:
   output_dir: './exp'
@@ -35,5 +36,5 @@ paths:
 
 # Model settings
 model:
-  config_name: 'nanoGPT' # 'gpt2' | 'nanoGPT' | 'neoGPT'
-  tokenizer_name: 'gpt2'
+  model_name: 'gpt-nano' # 'gpt-nano' | 'gpt-neo' | 'gpt-small' | 'llama3'
+  tokenizer_name: 'char' # 'gpt' | 'llama' | 'char'

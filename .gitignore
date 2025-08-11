@@ -41,7 +41,7 @@ venv.bak/
 exp/
 outputs/
 checkpoints/
-models/
+# models/
 *.model
 *.h5
 *.hdf5

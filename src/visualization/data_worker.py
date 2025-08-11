@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from src.data_collector import WeightsStatisticsCollector, MasksStatisticsCollector, summarize_statistics
+from src.hooks.data_collector import WeightsStatisticsCollector, MasksStatisticsCollector, summarize_statistics
 
 
 class DataWorker:
@@ -62,12 +62,13 @@ class DataWorker:
 
         self._collectors_info = collected_data['info']
 
-    def load_model(self, model: torch.nn.Module) -> DataWorker:
+    def load_model(self, model: torch.nn.Module, force_exact_quantiles: bool = False) -> DataWorker:
         """
         Loads a new model into the DataWorker.
 
         Args:
             model: The new model to load.
+            force_exact_quantiles: Whether to force exact quantiles computation.
 
         Returns:
             The updated DataWorker instance.
@@ -81,6 +82,7 @@ class DataWorker:
         s_collector = WeightsStatisticsCollector(
             zero_weight_threshold=self.zero_weight_threshold,
             dead_grad_threshold=self.dead_grad_threshold,
+            force_exact_quantiles=force_exact_quantiles,
             trackable_layers=None,
             collect_frequency=1,
             output_dir=None,

@@ -2,11 +2,6 @@ import yaml
 import torch
 import logging
 
-try:
-    from ptflops import get_model_complexity_info
-except ImportError:
-    get_model_complexity_info = None
-
 
 def load_config(config_path: str) -> dict:
     with open(config_path, 'r', encoding='utf-8') as f:
@@ -15,7 +10,9 @@ def load_config(config_path: str) -> dict:
 
 
 def compute_flops(model, seq_len: int, device: str):
-    if get_model_complexity_info is None:
+    try:
+        from ptflops import get_model_complexity_info
+    except ImportError:
         return None
 
     macs, _ = get_model_complexity_info(

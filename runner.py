@@ -1,46 +1,33 @@
 #!/usr/bin/env python3
 
 import os
-
 import argparse
 from pathlib import Path
 
-import matplotlib.pyplot as plt
+from transformers.trainer import Trainer
+from transformers.training_args import TrainingArguments
+from transformers.trainer_callback import TrainerCallback
+from transformers.data.data_collator import DataCollatorForLanguageModeling
 
-import math
+from src.pruning import auto_configure_pruning, PruneCallback, make_prune_strategy, print_pruning_schedule, validate_pruning_config
+from src.hooks import MasksStatisticsCollector, WeightsStatisticsCollector
+from src.training import configure_optimizer, PerplexityEvaluator, Summarize, infer_model
+from src.models import make_model
+from src.datasets import make_datasets
+from src import compute_flops, get_device, setup_logging, load_config
 
-import torch
-import torch.nn.functional as F
-from torch.optim import AdamW
-from transformers import get_cosine_schedule_with_warmup, Trainer, TrainingArguments, TrainerCallback, DataCollatorForLanguageModeling
-from transformers import AutoTokenizer, GPT2Tokenizer, GPTNeoConfig, GPTNeoForCausalLM, GPT2Config, GPT2LMHeadModel
-from transformers.trainer_pt_utils import LabelSmoother
 
-from src import (
-    PruneCallback,
-    make_prune_strategy,
-    PerplexityEvaluator,
-    Summarize,
-    infer_model,
-    MasksStatisticsCollector,
-    WeightsStatisticsCollector,
-    summarize_statistics,
-    DataWorker,
-    Visualizer,
-    load_shakespeare,
-    load_wikitext,
-    load_red_pajama,
-    compute_flops,
-    load_config,
-    get_device,
-    setup_logging,
-    auto_configure_pruning,
-    print_pruning_schedule,
-    validate_pruning_config,
-    configure_optimizer,
-    nanoGPT,
-    nanoGPTConfig
-)
+class InferHook(TrainerCallback):
+    def __init__(self, model, tokenizer, device):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.device = device
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        prompt = "\n"
+        input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
+        output = self.model.generate(input_ids, max_length=500, temperature=0.8, top_k=200)
+        print(self.tokenizer.decode(output[0], skip_special_tokens=True))
 
 
 def main():
@@ -62,38 +49,29 @@ def main():
 
     # Get device
     device = get_device(config['training']['device'])
-    logger.info(f"Using device: {device}")
 
     # Initialize tokenizer
-    tokenizer = GPT2Tokenizer.from_pretrained(config['model']['tokenizer_name'])
-    # tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
-    tokenizer.pad_token = tokenizer.eos_token
+    logger.info(f"Initializing tokenizer ({config['model']['tokenizer_name']}) and model ({config['model']['model_name']}) on {device}...")
+    model, tokenizer = make_model(
+        config['model']['model_name'],
+        config['model']['tokenizer_name'],
+        device
+    )
 
     # Load data
-    logger.info("Loading data...")
-    assert config['training']['dataset'] in ['shakespeare', 'wikitext', 'red_pajama'], "Only 'shakespeare', 'wikitext' and 'red_pajama' datasets are currently supported"
-    if config['training']['dataset'] == 'shakespeare':
-        train_loader, val_loader = load_shakespeare(
-            config['training']['batch_size'],
-            config['training']['seq_len'],
-            tokenizer
-        )
-    elif config['training']['dataset'] == 'wikitext':
-        train_loader, val_loader = load_wikitext(
-            config['training']['batch_size'],
-            config['training']['seq_len'],
-            tokenizer
-        )
-    elif config['training']['dataset'] == 'red_pajama':
-        train_loader, val_loader = load_red_pajama(
-            config['training']['batch_size'],
-            config['training']['seq_len'],
-            tokenizer
-        )
+    train_dataset, val_dataset = make_datasets(
+        config['training']['dataset'],
+        config['training']['seq_len'],
+        tokenizer
+    )
+    total_steps_per_epoch = len(train_dataset) // config['training']['batch_size']
 
     # Auto-configure pruning parameters
-    config = auto_configure_pruning(config, len(train_loader))
-    print_pruning_schedule(config)
+    config = auto_configure_pruning(config, total_steps_per_epoch)
+    if config['mode'] != 'none':
+        print_pruning_schedule(config)
+    else:
+        print("No pruning schedule to display.")
 
     # Validate pruning configuration
     is_valid, warnings = validate_pruning_config(config)
@@ -101,22 +79,10 @@ def main():
         for warning in warnings:
             logger.warning(f"Pruning config warning: {warning}")
 
-    # Initialize model
-    assert config['model']['config_name'] in ['gpt2', 'nanoGPT', 'neoGPT'], "Only 'gpt2', 'nanoGPT' and 'neoGPT' models are currently supported"
-    if config['model']['config_name'] == 'gpt2':
-        model_config = GPT2Config()
-        model = GPT2LMHeadModel(model_config).to(device)
-    elif config['model']['config_name'] == 'nanoGPT':
-        model_config = nanoGPTConfig()
-        model = nanoGPT(model_config).to(device)
-    elif config['model']['config_name'] == 'neoGPT':
-        model_config = GPTNeoConfig.from_pretrained("EleutherAI/gpt-neo-125M")
-        model = GPTNeoForCausalLM(model_config).to(device)
-
     # Initialize pruner with metrics collector
     output_dir = Path(config['paths']['output_dir'])
 
-    callbacks = []
+    callbacks = [InferHook(model, tokenizer, device)]
 
     mode_to_prune_strategy = {
         'none': 'none',
@@ -134,7 +100,7 @@ def main():
         config['pruning']['prune_freq'],
     ))
 
-    run_name = f"{config['model']['config_name']}-{config['training']['dataset']}-{config['mode']}"
+    run_name = f"{config['model']['model_name']}-{config['training']['dataset']}-{config['mode']}"
     if config['mode'] != 'none':
         run_name += f"-{config['pruning']['target_sparsity']}"
 
@@ -144,6 +110,7 @@ def main():
         s_collector = WeightsStatisticsCollector(
             config['collector']['zero_weight_threshold'],
             config['collector']['dead_grad_threshold'],
+            False,
             config['collector'].get('trackable_weights_layers'),
             config['collector']['s_collect_frequency'],
             config['collector']['dump_frequency'],
@@ -162,47 +129,32 @@ def main():
         )
         callbacks.append(m_collector)
 
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=False,  # GPT-2 does not use masked language modeling
-    )
-
     evaluator = PerplexityEvaluator()
 
-    optimizer = configure_optimizer(config['training'], model.parameters(), len(train_loader))
-    label_smoother = LabelSmoother(epsilon=0.0)
-    loss_fn = lambda outputs, labels, num_items_in_batch: label_smoother(outputs, labels)
+    optimizer = configure_optimizer(model.parameters(), total_steps_per_epoch * config['training']['epochs'], config['training']['lr'])
 
     Trainer(
         model=model,
         args=TrainingArguments(
             output_dir=str(output_dir),
+            run_name=run_name,
+            report_to=config['training']['report_to'],
+            logging_dir=str(output_dir / 'logs'),
+            logging_steps=10,
+
             num_train_epochs=config['training']['epochs'],
             per_device_train_batch_size=config['training']['batch_size'],
             per_device_eval_batch_size=config['training']['batch_size'],
-            learning_rate=config['training']['lr'],
-            weight_decay=0.01,
-            adam_beta1=0.9,
-            adam_beta2=0.999,
-            adam_epsilon=1e-8,
-            logging_dir=str(output_dir / 'logs'),
-            logging_steps=10,
-            run_name=run_name,
-            save_steps=99999,
+            gradient_accumulation_steps=config['training'].get('gradient_accumulation_steps', 1),
             save_strategy="no",
             eval_steps=config['training']['eval_steps'],
             eval_strategy='steps',
-            save_total_limit=3,
             fp16=config['training'].get('use_bf16', False),
             max_grad_norm=1.0,
-            report_to=config['training']['report_to'],
-            # no_cuda=True,
         ),
-        data_collator=data_collator,
-        train_dataset=train_loader.dataset,
-        eval_dataset=val_loader.dataset,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
         compute_metrics=evaluator.evaluate,
-        # compute_loss_func=loss_fn,
         optimizers=optimizer,
         callbacks=callbacks,
     ).train()
